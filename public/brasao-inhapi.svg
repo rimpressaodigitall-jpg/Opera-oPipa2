@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12 -12 524 624" width="524" height="624">
+  <!-- Outer Shield Dark Blue (#174978) -->
+  <path d="M 96 0 L 404 0 A 96 96 0 0 1 500 96 L 500 320 C 500 468 394 565 250 600 C 106 565 0 468 0 320 L 0 96 A 96 96 0 0 1 96 0 Z" fill="#174978" />
+  
+  <!-- Inner Shield White Fill (#FFFFFF) -->
+  <path d="M 98 22 L 402 22 A 74 74 0 0 1 478 96 L 478 318 C 478 452 380 542 250 576 C 120 542 22 452 22 318 L 22 96 A 74 74 0 0 1 98 22 Z" fill="#FFFFFF" />
+
+  <!-- ================= QUADRANT 1: TOP LEFT (Serra / Cruz) ================= -->
+  <defs>
+    <!-- Inner clip for Quadrant 1 -->
+    <clipPath id="q1-clip">
+      <rect x="69" y="69" width="149" height="184" rx="22" />
+    </clipPath>
+    <!-- Inner clip for Quadrant 2 -->
+    <clipPath id="q2-clip">
+      <rect x="280" y="69" width="150" height="184" rx="22" />
+    </clipPath>
+    <!-- Inner clip for Quadrant 3 -->
+    <clipPath id="q3-clip">
+      <path d="M 91 317 L 196 317 A 22 22 0 0 1 218 339 L 218 522 C 142 503 69 440 69 339 A 22 22 0 0 1 91 317 Z" />
+    </clipPath>
+    <!-- Inner clip for Quadrant 4 -->
+    <clipPath id="q4-clip">
+      <path d="M 302 317 L 408 317 A 22 22 0 0 1 430 339 C 430 440 357 503 280 522 L 280 339 A 22 22 0 0 1 302 317 Z" />
+    </clipPath>
+  </defs>
+
+  <!-- Q1 Frame (Dark Blue) -->
+  <rect x="47" y="47" width="193" height="228" rx="42" fill="#174978" />
+  <rect x="69" y="69" width="149" height="184" rx="22" fill="#FFFFFF" />
+  <g clip-path="url(#q1-clip)">
+    <!-- Cross in Light Blue (#4A8DB7) -->
+    <path d="M 164 85 H 184 V 107 H 204 V 127 H 184 V 185 H 164 V 127 H 142 V 107 H 164 Z" fill="#FFFFFF" stroke="#4A8DB7" stroke-width="6.5" stroke-linejoin="miter" />
+    <!-- Hill / Mountain in Dark Blue (#174978) -->
+    <path d="M 65 205 L 134 138 C 140 132 148 132 155 138 L 225 202 L 225 260 L 65 260 Z" fill="#174978" />
+    <!-- White curved valley path at bottom left of hill -->
+    <path d="M 65 220 L 92 195 C 102 220 135 228 168 242 L 185 260 L 65 260 Z" fill="#FFFFFF" />
+  </g>
+
+  <!-- ================= QUADRANT 2: TOP RIGHT (Oca Indígena) ================= -->
+  <!-- Q2 Frame (Light Blue #4A8DB7) -->
+  <rect x="258" y="47" width="194" height="228" rx="42" fill="#4A8DB7" />
+  <rect x="280" y="69" width="150" height="184" rx="22" fill="#FFFFFF" />
+  <g clip-path="url(#q2-clip)">
+    <!-- Oca Straw Roof (Light Blue #4A8DB7 + White Texture) -->
+    <path d="M 355 96 L 343 92 L 348 102 L 338 99 L 344 107 C 318 130 292 168 276 205 L 276 226 L 434 226 L 434 205 C 418 168 392 130 366 107 L 372 99 L 362 102 L 367 92 Z" fill="#4A8DB7" />
+    <!-- White straw layers inside Oca roof -->
+    <!-- Upper cone -->
+    <path d="M 355 110 C 338 128 320 152 308 175 L 315 170 L 318 177 L 325 168 L 330 176 L 338 166 L 344 176 L 352 168 L 358 176 L 365 168 L 372 177 L 380 166 L 386 176 L 394 168 L 402 175 C 390 152 372 128 355 110 Z" fill="#FFFFFF" />
+    <!-- Middle/lower straw layers -->
+    <path d="M 303 182 C 294 196 287 210 283 224 L 335 224 L 335 202 L 340 206 L 346 198 L 355 205 L 364 198 L 370 206 L 375 202 L 375 224 L 427 224 C 423 210 416 196 407 182 L 398 189 L 392 181 L 384 190 L 376 180 L 368 189 L 360 180 L 350 189 L 342 180 L 334 190 L 326 181 L 318 189 Z" fill="#FFFFFF" />
+    <!-- Straw details in light blue -->
+    <path d="M 332 132 L 326 146 L 334 143 L 331 153 L 340 146 L 342 154 L 348 144 Z" fill="#4A8DB7" />
+    <path d="M 366 126 L 362 142 L 369 139 L 368 150 L 376 142 L 380 151 L 384 139 L 390 145 L 386 132 Z" fill="#4A8DB7" />
+    <path d="M 302 186 L 295 202 L 304 199 L 301 212 L 311 203 L 315 213 L 320 198 Z" fill="#4A8DB7" />
+    <path d="M 388 186 L 384 202 L 392 199 L 391 212 L 400 203 L 405 213 L 408 198 Z" fill="#4A8DB7" />
+    <!-- Dark Blue Base Ground and Doorway (#174978) -->
+    <rect x="275" y="222" width="160" height="36" fill="#174978" />
+    <rect x="339" y="198" width="32" height="30" rx="3" fill="#174978" />
+  </g>
+
+  <!-- ================= QUADRANT 3: BOTTOM LEFT (Ferramentas / Artesanato) ================= -->
+  <!-- Q3 Outer Frame (Light Blue #4A8DB7) -->
+  <path d="M 89 295 L 198 295 A 42 42 0 0 1 240 337 L 240 548 C 132 522 47 444 47 337 A 42 42 0 0 1 89 295 Z" fill="#4A8DB7" />
+  <!-- Q3 Inner White Background -->
+  <path d="M 91 317 L 196 317 A 22 22 0 0 1 218 339 L 218 522 C 142 503 69 440 69 339 A 22 22 0 0 1 91 317 Z" fill="#FFFFFF" />
+  <g clip-path="url(#q3-clip)">
+    <!-- Trowel / Pazinha (Top, Dark Blue #174978) -->
+    <g stroke="#174978" stroke-width="5.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Handle -->
+      <path d="M 103 324 C 95 320 88 328 91 337 C 94 344 102 346 109 343 L 146 360 L 152 347 L 115 330 C 115 326 110 322 103 324 Z" fill="#FFFFFF" />
+      <circle cx="103" cy="334" r="3.5" fill="#174978" stroke="none" />
+      <!-- Scoop / Blade -->
+      <path d="M 157 336 C 182 344 205 362 212 380 C 214 385 210 390 204 391 C 184 394 156 389 138 380 C 135 378 136 371 140 364 L 154 340 C 155 337 156 336 157 336 Z" fill="#FFFFFF" />
+      <!-- Inner socket -->
+      <path d="M 146 355 L 158 361 C 162 363 160 370 155 368 L 143 362" stroke-width="5" />
+    </g>
+
+    <!-- Paintbrush 1 (Leftmost thin brush, Light Blue #4A8DB7) -->
+    <g stroke="#4A8DB7" stroke-width="4" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Handle -->
+      <path d="M 96 406 L 128 478 C 131 484 134 483 132 476 L 103 403 Z" />
+      <!-- Ferrule -->
+      <path d="M 94 401 L 104 397 L 106 403 L 96 407 Z" />
+      <!-- Bristles -->
+      <path d="M 94 401 C 82 396 81 382 92 376 C 97 373 100 372 102 369 C 103 376 108 386 104 397 Z" />
+    </g>
+
+    <!-- Paintbrush 2 (Middle flat brush, Dark Blue #174978) -->
+    <g stroke="#174978" stroke-width="4" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Handle -->
+      <path d="M 112 362 C 110 358 114 356 117 361 L 148 436 L 139 440 Z" />
+      <!-- Ferrule -->
+      <path d="M 138 440 L 154 434 L 164 460 L 148 466 Z" />
+      <!-- Bristles lines -->
+      <path d="M 148 462 L 145 454 M 153 460 L 150 451 M 158 458 L 155 450" stroke-width="2.5" />
+    </g>
+
+    <!-- Spade / Mallet Tool (Right, Light Blue #4A8DB7) -->
+    <g stroke="#4A8DB7" stroke-width="4.5" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Upper handle -->
+      <path d="M 222 385 C 212 388 198 412 192 431 L 201 435 C 209 418 218 402 224 395 Z" />
+      <!-- Neck collar -->
+      <path d="M 188 431 L 204 438 L 200 445 L 185 438 Z" />
+      <!-- Triangular Blade -->
+      <path d="M 178 445 L 214 452 L 163 512 L 178 445 Z" />
+      <path d="M 178 445 L 188 438 L 201 444 L 214 452" />
+    </g>
+  </g>
+
+  <!-- ================= QUADRANT 4: BOTTOM RIGHT (Agricultura / Broto) ================= -->
+  <!-- Q4 Outer Frame (Dark Blue #174978) -->
+  <path d="M 300 295 L 411 295 A 42 42 0 0 1 453 337 C 453 444 368 522 260 548 L 260 337 A 42 42 0 0 1 300 295 Z" fill="#174978" />
+  <!-- Q4 Inner White Background -->
+  <path d="M 302 317 L 408 317 A 22 22 0 0 1 430 339 C 430 440 357 503 280 522 L 280 339 A 22 22 0 0 1 302 317 Z" fill="#FFFFFF" />
+  <g clip-path="url(#q4-clip)">
+    <!-- Left Furrows (3 Dark Blue Arches) -->
+    <path d="M 275 408 C 305 408 335 418 356 436" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+    <path d="M 275 430 C 300 430 325 438 344 454" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+    <path d="M 275 452 C 295 452 315 459 331 472" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+
+    <!-- Right Furrows (4 Dark Blue Concentric Arches) -->
+    <path d="M 294 528 C 304 460 352 422 406 422 C 418 422 428 424 436 427" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+    <path d="M 314 528 C 324 472 362 442 408 442 C 418 442 428 444 436 447" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+    <path d="M 334 528 C 344 484 374 462 410 462 C 419 462 428 464 436 467" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+    <path d="M 354 528 C 362 496 385 482 414 482 C 422 482 429 484 436 487" fill="none" stroke="#174978" stroke-width="12" stroke-linecap="round" />
+
+    <!-- Plant Sprout (Light Blue #4A8DB7) -->
+    <!-- Stem and Right Leaf -->
+    <path d="M 362 434 C 350 398 352 366 376 346 C 392 333 410 330 420 330 C 416 355 398 380 364 388 C 360 404 362 420 366 434 Z" fill="#4A8DB7" />
+    <!-- White vein on Right Leaf -->
+    <path d="M 363 386 C 374 370 388 356 404 345 C 386 353 370 366 361 382 Z" fill="#FFFFFF" />
+    <!-- Left Leaf -->
+    <path d="M 347 386 C 324 384 307 368 300 350 C 318 349 342 356 350 382 C 344 370 332 362 320 358 C 330 364 340 374 347 386 Z" fill="#4A8DB7" />
+  </g>
+</svg>

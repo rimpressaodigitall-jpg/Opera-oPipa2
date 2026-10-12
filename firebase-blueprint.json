@@ -1,0 +1,160 @@
+{
+  "entities": {
+    "Truck": {
+      "title": "Truck",
+      "description": "Represents a water tank truck in the fleet.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "plate": { "type": "string" },
+        "driverName": { "type": "string" },
+        "lastLat": { "type": "number" },
+        "lastLng": { "type": "number" },
+        "lastUpdate": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["IDLE", "IN_ROUTE", "ARRIVED"] }
+      },
+      "required": ["plate", "driverName"]
+    },
+    "Delivery": {
+      "title": "Delivery",
+      "description": "Represents a water delivery task assigned to a truck.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "truckId": { "type": "string" },
+        "residentName": { "type": "string" },
+        "address": { "type": "string" },
+        "referencePoint": { "type": "string" },
+        "councilman": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "IN_ROUTE", "DELIVERED"] },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "photo": { "type": "string", "description": "Base64 encoded image for proof of delivery" }
+      },
+      "required": ["residentName", "address", "councilman", "status"]
+    },
+    "Sitio": {
+      "title": "Sitio",
+      "description": "Custom locations/farms registered in the system.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "description": { "type": "string" }
+      },
+      "required": ["name", "lat", "lng"]
+    },
+    "Resident": {
+      "title": "Resident",
+      "description": "Represents a resident who receives water deliveries.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "neighborhood": { "type": "string" },
+        "phone": { "type": "string" },
+        "councilman": { "type": "string" }
+      },
+      "required": ["name", "address", "neighborhood"]
+    },
+    "Councilman": {
+      "title": "Councilman",
+      "description": "Represents a councilman associated with water requests.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Represents a registered water truck driver.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "DeviceSyncStatus": {
+      "title": "DeviceSyncStatus",
+      "description": "Tracks offline queue synchronization status per truck device.",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "plate": { "type": "string" },
+        "pendingCount": { "type": "number" },
+        "lastUpdate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deviceId"]
+    },
+    "PushSubscriptionRecord": {
+      "title": "PushSubscriptionRecord",
+      "description": "Stores Web Push subscription endpoints per truck.",
+      "type": "object",
+      "properties": {
+        "truckId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "lastUpdate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["truckId"]
+    },
+    "AdminConfig": {
+      "title": "AdminConfig",
+      "description": "System configuration for administrators.",
+      "type": "object",
+      "properties": {
+        "password": { "type": "string", "description": "Hashed or plain text password for admin access" },
+        "secretaryPassword": { "type": "string" },
+        "driverPassword": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["password"]
+    }
+  },
+  "firestore": {
+    "/config/{configId}": {
+      "schema": "AdminConfig",
+      "description": "Global system configuration and VAPID keys."
+    },
+    "/trucks/{truckId}": {
+      "schema": "Truck",
+      "description": "Collection of trucks."
+    },
+    "/deliveries/{deliveryId}": {
+      "schema": "Delivery",
+      "description": "Collection of deliveries."
+    },
+    "/sitios/{sitioId}": {
+      "schema": "Sitio",
+      "description": "Collection of custom registered locations (sitios)."
+    },
+    "/residents/{residentId}": {
+      "schema": "Resident",
+      "description": "Collection of residents."
+    },
+    "/councilmen/{councilmanId}": {
+      "schema": "Councilman",
+      "description": "Collection of councilmen."
+    },
+    "/drivers/{driverId}": {
+      "schema": "Driver",
+      "description": "Collection of drivers."
+    },
+    "/device_sync_status/{deviceId}": {
+      "schema": "DeviceSyncStatus",
+      "description": "Collection of device synchronization statuses."
+    },
+    "/push_subscriptions/{subId}": {
+      "schema": "PushSubscriptionRecord",
+      "description": "Collection of Web Push subscriptions."
+    }
+  }
+}
