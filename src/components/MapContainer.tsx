@@ -1,10 +1,10 @@
 import { MapContainer as LeafletMap, TileLayer, Marker, Popup, useMapEvents, Polyline, useMap, LayersControl } from 'react-leaflet';
 import L from 'leaflet';
-import { Truck, Delivery, Sitio } from '../types';
-import { LocateFixed, Filter, Check, Layers, ExternalLink, User, Search, X, Navigation, Plus, Minus, Maximize, Users, Truck as TruckIcon, CheckCircle2, Clock, ArrowLeft } from 'lucide-react';
-import { useState, useEffect, useMemo } from 'react';
+import { Truck, Delivery, Sitio, Driver, Resident } from '../types';
+import { LocateFixed, Filter, Check, Layers, ExternalLink, User, Search, X, Navigation, Plus, Minus, Maximize, Users, Truck as TruckIcon, CheckCircle2, Clock, ArrowLeft, Home, Phone, MapPin } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { fetchRoadRoute, isRoadRoute } from '../lib/routing';
+import { fetchRoadRoute, isRoadRoute, getHaversineDistanceKm } from '../lib/routing';
 
 // Using divIcon for all markers to avoid image import issues in TS
 const defaultIcon = L.divIcon({
@@ -319,16 +319,55 @@ const truckIcon = (
   });
 };
 
-const deliveryIcon = (status: string) => L.divIcon({
-  className: 'custom-div-icon',
-  html: `<div style="background-color: ${status === 'IN_ROUTE' ? '#F59E0B' : '#3B82F6'}; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>`,
-  iconSize: [10, 10],
-  iconAnchor: [5, 5]
-});
+const deliveryIcon = (status: string, residentName?: string) => {
+  if (status === 'DELIVERED') {
+    const shortName = (residentName || 'Entregue').split(' ')[0];
+    return L.divIcon({
+      className: 'custom-delivery-delivered-icon',
+      html: `
+        <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.4)); cursor: pointer;">
+          <div style="background: #047857; color: white; padding: 1.5px 6px; border-radius: 6px; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; border: 1.5px solid #34D399; white-space: nowrap; display: flex; align-items: center; gap: 3px; box-shadow: 0 2px 4px rgba(0,0,0,0.25);">
+            <span>✓</span>
+            <span style="max-width: 85px; overflow: hidden; text-overflow: ellipsis;">${shortName}</span>
+          </div>
+          <div style="background-color: #10B981; width: 28px; height: 28px; border-radius: 50% 50% 50% 0; border: 2px solid white; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); margin-top: -2px; box-shadow: 0 3px 8px rgba(16,185,129,0.5);">
+            <div style="transform: rotate(45deg); color: white; font-weight: 900; font-size: 13px;">
+              ✓
+            </div>
+          </div>
+        </div>
+      `,
+      iconSize: [100, 52],
+      iconAnchor: [50, 38],
+      popupAnchor: [0, -40]
+    });
+  }
 
-const getSitioIcon = (type?: string, fuelType?: string) => {
+  const isRoute = status === 'IN_ROUTE';
+  const color = isRoute ? '#F59E0B' : '#3B82F6';
+  const label = isRoute ? 'Em Rota' : 'Pendente';
+  const shortName = (residentName || label).split(' ')[0];
+
+  return L.divIcon({
+    className: 'custom-div-icon',
+    html: `
+      <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.3)); cursor: pointer;">
+        <div style="background: ${color}; color: white; padding: 1px 5px; border-radius: 5px; font-size: 8px; font-weight: 800; text-transform: uppercase; white-space: nowrap; border: 1px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+          ${shortName}
+        </div>
+        <div style="background-color: ${color}; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; margin-top: 1px; box-shadow: 0 0 6px ${color};"></div>
+      </div>
+    `,
+    iconSize: [80, 36],
+    iconAnchor: [40, 26],
+    popupAnchor: [0, -26]
+  });
+};
+
+const getSitioIcon = (type?: string, fuelType?: string, name?: string) => {
   let bgColor = '#8B5CF6'; // Default color (purple)
   let iconHtml = '';
+  let badgeLabel = (name || 'Sítio').split(' ')[0];
 
   if (type === 'WATER') {
     bgColor = '#0EA5E9'; // Blue for water
@@ -342,24 +381,35 @@ const getSitioIcon = (type?: string, fuelType?: string) => {
   } else if (type === 'DAYCARE') {
     bgColor = '#EC4899'; // Pink for daycare
     iconHtml = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12h.01"/><path d="M15 12h.01"/><path d="M10 16c.5.3 1.2.5 2 .5s1.5-.2 2-.5"/><circle cx="12" cy="12" r="10"/></svg>';
+  } else if (type === 'RESIDENT') {
+    bgColor = '#059669'; // Emerald for resident sitio
+    iconHtml = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>';
   } else {
-    iconHtml = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle></svg>';
+    bgColor = '#8B5CF6';
+    iconHtml = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>';
   }
+
+  const nameBadge = name ? `
+    <div style="background: ${bgColor}; color: white; padding: 1px 6px; border-radius: 6px; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; border: 1.5px solid rgba(255,255,255,0.8); white-space: nowrap; max-width: 90px; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 2px 4px rgba(0,0,0,0.25);">
+      ${badgeLabel}
+    </div>
+  ` : '';
 
   return L.divIcon({
     className: 'custom-div-icon',
     html: `
-      <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3));">
-        <div style="background-color: ${bgColor}; width: 32px; height: 32px; border-radius: 50% 50% 50% 0; border: 2px solid white; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg);">
+      <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3)); cursor: pointer;">
+        ${nameBadge}
+        <div style="background-color: ${bgColor}; width: 30px; height: 30px; border-radius: 50% 50% 50% 0; border: 2px solid white; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); margin-top: ${name ? '-2px' : '0'};">
           <div style="transform: rotate(45deg); display: flex;">
             ${iconHtml}
           </div>
         </div>
       </div>
     `,
-    iconSize: [32, 38],
-    iconAnchor: [16, 36],
-    popupAnchor: [0, -32]
+    iconSize: [95, 48],
+    iconAnchor: [47.5, 42],
+    popupAnchor: [0, -40]
   });
 };
 
@@ -386,17 +436,79 @@ const userLocationIcon = L.divIcon({
   iconAnchor: [7, 7]
 });
 
+// Ícone personalizado para o Sítio / Residência do Motorista (salvo via GPS do celular)
+const driverHomeSitioIcon = (sitioName: string, driverName: string) => {
+  const shortSitio = (sitioName || 'Sítio').trim();
+  const shortDriver = (driverName || 'Motorista').split(' ')[0];
+  return L.divIcon({
+    className: 'custom-driver-home-icon',
+    html: `
+      <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.5)); cursor: pointer;">
+        <div style="background: linear-gradient(135deg, #047857, #065F46); color: white; padding: 2px 7px; border-radius: 8px; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px; border: 1.5px solid #34D399; white-space: nowrap; display: flex; align-items: center; gap: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.3);">
+          <span>🏠</span>
+          <span>${shortSitio}</span>
+        </div>
+        <div style="background-color: #059669; width: 34px; height: 34px; border-radius: 50% 50% 50% 0; border: 2.5px solid white; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); margin-top: -3px; box-shadow: 0 4px 10px rgba(5,150,105,0.4);">
+          <div style="transform: rotate(45deg); font-size: 16px;">
+            🏡
+          </div>
+        </div>
+        <div style="background: rgba(15, 23, 42, 0.95); color: #A7F3D0; font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 4px; margin-top: 1px; white-space: nowrap; border: 1px solid rgba(52, 211, 153, 0.4);">
+          Mot. ${shortDriver}
+        </div>
+      </div>
+    `,
+    iconSize: [120, 62],
+    iconAnchor: [60, 44],
+    popupAnchor: [0, -45]
+  });
+};
+
+// Ícone personalizado para Moradores / Localidades salvas com GPS pelo celular do motorista
+const residentMarkerIcon = (resident: Resident) => {
+  const isSchool = resident.category === 'SCHOOL';
+  const isDaycare = resident.category === 'DAYCARE';
+  const emoji = isSchool ? '🏫' : isDaycare ? '👶' : '👤';
+  const bgColor = isSchool ? '#4F46E5' : isDaycare ? '#DB2777' : '#0284C7';
+  const borderColor = isSchool ? '#A5B4FC' : isDaycare ? '#FBCFE8' : '#7DD3FC';
+  const shortName = (resident.name || 'Morador').split(' ')[0];
+
+  return L.divIcon({
+    className: 'custom-resident-marker-icon',
+    html: `
+      <div style="display: flex; flex-direction: column; align-items: center; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.4)); cursor: pointer;">
+        <div style="background: ${bgColor}; color: white; padding: 1.5px 6px; border-radius: 7px; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px; border: 1.5px solid ${borderColor}; white-space: nowrap; display: flex; align-items: center; gap: 3px; box-shadow: 0 2px 4px rgba(0,0,0,0.25);">
+          <span>${emoji}</span>
+          <span style="max-width: 85px; overflow: hidden; text-overflow: ellipsis;">${shortName}</span>
+        </div>
+        <div style="background-color: ${bgColor}; width: 28px; height: 28px; border-radius: 50% 50% 50% 0; border: 2px solid white; display: flex; align-items: center; justify-content: center; transform: rotate(-45deg); margin-top: -2px; box-shadow: 0 3px 8px rgba(0,0,0,0.35);">
+          <div style="transform: rotate(45deg); font-size: 13px;">
+            ${emoji}
+          </div>
+        </div>
+      </div>
+    `,
+    iconSize: [100, 52],
+    iconAnchor: [50, 38],
+    popupAnchor: [0, -40]
+  });
+};
+
 interface MapViewProps {
   trucks: Truck[];
   deliveries: Delivery[];
   sitios: Sitio[];
+  drivers?: Driver[];
+  residents?: Resident[];
   onMapClick?: (lat: number, lng: number) => void;
   onSitioClick?: (sitio: Sitio) => void;
+  onSelectResidentForDelivery?: (resident: Resident) => void;
   selectedTruckId?: string | null;
   route?: [number, number][];
   newPoint?: [number, number] | null;
   isDriver?: boolean;
   onOpenDriverSelector?: () => void;
+  flyToCoords?: [number, number] | null;
 }
 
 function MapClickHandler({ onClick }: { onClick?: (lat: number, lng: number) => void }) {
@@ -448,7 +560,7 @@ function LocateControl({
         (pos) => {
           const { latitude, longitude } = pos.coords;
           setPosition([latitude, longitude]);
-          map.flyTo([latitude, longitude], map.getZoom());
+          map.flyTo([latitude, longitude], map.getZoom() || 16, { animate: true, duration: 1.0 });
         },
         (err) => {
           console.error("Erro ao obter localização:", err);
@@ -462,6 +574,29 @@ function LocateControl({
       if (watchId !== undefined) navigator.geolocation.clearWatch(watchId);
     };
   }, [isLocating, map, isDriver]);
+
+  const handleDriverLocateClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude, longitude } = pos.coords;
+          setPosition([latitude, longitude]);
+          map.flyTo([latitude, longitude], 17, { animate: true, duration: 1.2 });
+          setIsLocating(true);
+        },
+        (err) => {
+          console.warn("Aviso ao buscar GPS instantâneo:", err);
+          if (selectedTruck?.lastLat && selectedTruck?.lastLng) {
+            map.flyTo([selectedTruck.lastLat, selectedTruck.lastLng], 17, { animate: true, duration: 1.2 });
+          }
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      );
+    } else if (selectedTruck?.lastLat && selectedTruck?.lastLng) {
+      map.flyTo([selectedTruck.lastLat, selectedTruck.lastLng], 17, { animate: true, duration: 1.2 });
+    }
+  };
 
   return (
     <>
@@ -498,16 +633,13 @@ function LocateControl({
         {/* Localizar Motorista (Admin) ou Minha Localização GPS (Driver) */}
         {isDriver ? (
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsLocating(!isLocating);
-            }}
+            onClick={handleDriverLocateClick}
             className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition-all active:scale-90 ${
               isLocating 
                 ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30 ring-2 ring-blue-400/40' 
                 : 'text-blue-600 hover:bg-blue-50'
             }`}
-            title={isLocating ? "Parar de Seguir Minha Localização" : "Minha Localização Atual"}
+            title="Minha Localidade (Levar mapa para minha localização atual)"
           >
             <LocateFixed size={18} className={isLocating ? "animate-pulse" : ""} />
           </button>
@@ -670,11 +802,11 @@ function MapAutoZoom({ truck, route, autoTrack }: { truck?: Truck, route?: [numb
   return null;
 }
 
-function MapFlyToHandler({ target }: { target: [number, number] | null }) {
+function MapFlyToHandler({ target }: { target: { coords: [number, number]; id: number } | null }) {
   const map = useMap();
   useEffect(() => {
-    if (target) {
-      map.flyTo(target, 16, { animate: true, duration: 1.2 });
+    if (target && target.coords) {
+      map.flyTo(target.coords, 17, { animate: true, duration: 1.2 });
     }
   }, [target, map]);
   return null;
@@ -721,13 +853,35 @@ function CustomZoomControl({ isDriver }: { isDriver?: boolean }) {
   );
 }
 
-export default function MapContainer({ trucks, deliveries, sitios, onMapClick, onSitioClick, selectedTruckId, route, newPoint, isDriver, onOpenDriverSelector }: MapViewProps) {
+export default function MapContainer({ 
+  trucks, 
+  deliveries, 
+  sitios, 
+  drivers = [], 
+  residents = [], 
+  onMapClick, 
+  onSitioClick, 
+  onSelectResidentForDelivery, 
+  selectedTruckId, 
+  route, 
+  newPoint, 
+  isDriver, 
+  onOpenDriverSelector,
+  flyToCoords
+}: MapViewProps) {
   const center: [number, number] = route && route.length > 0 ? route[0] : [-9.2201, -36.3503]; // Use route start or Inhapi, AL city center
   const selectedTruck = trucks.find(t => t.id === selectedTruckId);
 
   const [mapLayer, setMapLayer] = useState<'osmand' | 'satellite'>('osmand');
   const [autoTrack, setAutoTrack] = useState(true);
-  const [mapFlyTarget, setMapFlyTarget] = useState<[number, number] | null>(null);
+  const [mapFlyTarget, setMapFlyTarget] = useState<{ coords: [number, number]; id: number } | null>(null);
+
+  // Quando flyToCoords for recebido do botão Minha Localidade do motorista, centraliza e voa imediatamente
+  useEffect(() => {
+    if (flyToCoords && typeof flyToCoords[0] === 'number' && typeof flyToCoords[1] === 'number' && !isNaN(flyToCoords[0])) {
+      setMapFlyTarget({ coords: [flyToCoords[0], flyToCoords[1]], id: Date.now() });
+    }
+  }, [flyToCoords]);
 
   useEffect(() => {
     if (selectedTruckId) {
@@ -753,16 +907,115 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
     onlyActiveInService: true, // Prioriza rastrear os caminhões ativos em serviço no mapa do admin
     pending: true,
     inRoute: true,
-    delivered: false,
-    sitios: true
+    delivered: true, // Pontos de entregas concluídas salvos via GPS ficam visíveis por padrão
+    sitios: true,
+    driverSitios: true, // Sítios onde os motoristas moram (salvo via GPS do celular)
+    residents: true // Moradores e localidades salvas com GPS do celular
   });
-  const [showFilters, setShowFilters] = useState(false);
+  const [showLayersModal, setShowLayersModal] = useState(false);
+  const [countdownSecs, setCountdownSecs] = useState(5);
+  const [isInteractingWithModal, setIsInteractingWithModal] = useState(false);
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Mantém a tela de camadas aberta enquanto o usuário estiver mexendo nas configurações
+  const handleUserActivity = useCallback(() => {
+    setIsInteractingWithModal(true);
+    setCountdownSecs(5);
+
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+
+    // Só inicia a contagem regressiva para diminuir quando o usuário parar completamente de mexer por 4 segundos
+    idleTimerRef.current = setTimeout(() => {
+      setIsInteractingWithModal(false);
+    }, 4000);
+  }, []);
+
+  // Timer para diminuir/fechar automaticamente o painel de camadas apenas quando o usuário NÃO estiver mexendo
+  useEffect(() => {
+    let interval: any;
+
+    if (showLayersModal && !isInteractingWithModal) {
+      interval = setInterval(() => {
+        setCountdownSecs((prev) => {
+          if (prev <= 1) {
+            setShowLayersModal(false);
+            return 5;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [showLayersModal, isInteractingWithModal]);
+
+  // Limpa os timers ao fechar ou desmontar
+  useEffect(() => {
+    if (!showLayersModal) {
+      setIsInteractingWithModal(false);
+      setCountdownSecs(5);
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    }
+  }, [showLayersModal]);
+
+  const activeLayersCount = useMemo(() => {
+    let count = 0;
+    if (filters.residents) count++;
+    if (filters.driverSitios) count++;
+    if (filters.sitios) count++;
+    if (filters.delivered) count++;
+    if (filters.trucks) count++;
+    return count;
+  }, [filters]);
+
   const [streetViewMode, setStreetViewMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDetail, setSelectedDetail] = useState<{
-    type: 'truck' | 'delivery' | 'sitio' | 'water_supply' | 'new_point' | 'user_location';
+    type: 'truck' | 'delivery' | 'sitio' | 'water_supply' | 'new_point' | 'user_location' | 'driver_sitio' | 'resident';
     data: any;
   } | null>(null);
+
+  // Moradores e localidades salvos com coordenadas GPS pelo celular
+  const residentsWithCoords = useMemo(() => {
+    if (!residents || residents.length === 0) return [];
+    return residents.filter(r => {
+      const lat = Number(r.lat);
+      const lng = Number(r.lng);
+      const hasCoords = !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0;
+      if (!hasCoords) return false;
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        (r.name || '').toLowerCase().includes(q) ||
+        (r.address || '').toLowerCase().includes(q) ||
+        (r.neighborhood || '').toLowerCase().includes(q) ||
+        (r.referencePoint || '').toLowerCase().includes(q) ||
+        (r.sector || '').toLowerCase().includes(q)
+      );
+    }).map(r => ({ ...r, lat: Number(r.lat), lng: Number(r.lng) }));
+  }, [residents, searchQuery]);
+
+  // Sítios onde os motoristas moram com localização GPS capturada
+  const driverSitiosWithCoords = useMemo(() => {
+    if (!drivers || drivers.length === 0) return [];
+    return drivers.filter(d => {
+      const hasCoords = typeof d.homeLat === 'number' && typeof d.homeLng === 'number' && !isNaN(d.homeLat) && !isNaN(d.homeLng);
+      if (!hasCoords) return false;
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        (d.name || '').toLowerCase().includes(q) ||
+        (d.homeSitio || '').toLowerCase().includes(q) ||
+        (d.sector || '').toLowerCase().includes(q) ||
+        (d.address || '').toLowerCase().includes(q)
+      );
+    });
+  }, [drivers, searchQuery]);
 
   // Driver Selector Modal State (Complete list of all registered drivers)
   const [showDriverSelectorModal, setShowDriverSelectorModal] = useState(false);
@@ -796,23 +1049,41 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
     );
   });
 
-  const filteredDeliveries = deliveries.filter(delivery => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      (delivery.residentName || '').toLowerCase().includes(q) ||
-      (delivery.address || '').toLowerCase().includes(q)
-    );
-  });
+  const filteredDeliveries = useMemo(() => {
+    return deliveries.filter(delivery => {
+      const lat = Number(delivery.lat || (delivery as any).deliveredLat);
+      const lng = Number(delivery.lng || (delivery as any).deliveredLng);
+      if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) return false;
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        (delivery.residentName || '').toLowerCase().includes(q) ||
+        (delivery.address || '').toLowerCase().includes(q)
+      );
+    }).map(d => ({
+      ...d,
+      lat: Number(d.lat || (d as any).deliveredLat),
+      lng: Number(d.lng || (d as any).deliveredLng)
+    }));
+  }, [deliveries, searchQuery]);
 
-  const filteredSitios = sitios.filter(sitio => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      (sitio.name || '').toLowerCase().includes(q) ||
-      (sitio.description || '').toLowerCase().includes(q)
-    );
-  });
+  const filteredSitios = useMemo(() => {
+    return sitios.filter(sitio => {
+      const lat = Number(sitio.lat);
+      const lng = Number(sitio.lng);
+      if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) return false;
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        (sitio.name || '').toLowerCase().includes(q) ||
+        (sitio.description || '').toLowerCase().includes(q)
+      );
+    }).map(s => ({
+      ...s,
+      lat: Number(s.lat),
+      lng: Number(s.lng)
+    }));
+  }, [sitios, searchQuery]);
 
   const [routeColorStyle, setRouteColorStyle] = useState<'neon' | 'navy'>('neon');
   const [showRouteControls, setShowRouteControls] = useState(true);
@@ -888,10 +1159,8 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
   };
 
   return (
-    <div className="w-full h-full flex flex-col gap-2.5 sm:gap-3 relative z-0">
-      {/* Área do Mapa */}
-      <div className="flex-1 w-full min-h-[340px] sm:min-h-[420px] relative rounded-2xl overflow-hidden shadow-sm border border-slate-200/90 z-0 isolate">
-        {/* Auto tracking Active Badge (Apenas modo Motorista) */}
+    <div className="w-full h-full min-h-[340px] sm:min-h-[420px] relative rounded-2xl overflow-hidden shadow-sm border border-slate-200/90 z-0 isolate">
+      {/* Auto tracking Active Badge (Apenas modo Motorista) */}
         {isDriver && selectedTruck && autoTrack && (
           <div className="absolute top-2.5 sm:top-3 left-1/2 -translate-x-1/2 z-[1025] max-w-[calc(100%-120px)] bg-emerald-950/95 text-emerald-300 backdrop-blur-md px-3 py-1.5 rounded-xl border border-emerald-500/30 flex items-center gap-2 shadow-lg text-[10px] font-black uppercase tracking-wider truncate pointer-events-auto">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping flex-shrink-0" />
@@ -1091,7 +1360,7 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
                   html: `<div style="background-color: #10B981; width: 22px; height: 22px; border-radius: 50%; border: 2px solid white; color: white; font-size: 11px; font-weight: 900; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 10px rgba(0,0,0,0.3);">${sequenceIndex}</div>`,
                   iconSize: [22, 22],
                   iconAnchor: [11, 11]
-                }) : deliveryIcon(delivery.status)}
+                }) : deliveryIcon(delivery.status, delivery.residentName)}
                 eventHandlers={{
                   click: () => setSelectedDetail({
                     type: 'delivery',
@@ -1107,7 +1376,7 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
           <Marker
             key={sitio.id}
             position={[sitio.lat, sitio.lng]}
-            icon={getSitioIcon(sitio.type, sitio.fuelType)}
+            icon={getSitioIcon(sitio.type, sitio.fuelType, sitio.name)}
             eventHandlers={{
               click: () => {
                 setSelectedDetail({
@@ -1115,6 +1384,40 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
                   data: sitio
                 });
                 onSitioClick?.(sitio);
+              }
+            }}
+          />
+        ))}
+
+        {/* Sítios onde os Motoristas moram (Salvos via GPS do Celular) */}
+        {filters.driverSitios && driverSitiosWithCoords.map((driver) => (
+          <Marker
+            key={`driver-home-${driver.id}`}
+            position={[driver.homeLat!, driver.homeLng!]}
+            icon={driverHomeSitioIcon(driver.homeSitio || 'Sítio do Motorista', driver.name)}
+            eventHandlers={{
+              click: () => {
+                setSelectedDetail({
+                  type: 'driver_sitio',
+                  data: driver
+                });
+              }
+            }}
+          />
+        ))}
+
+        {/* Moradores e Localidades salvas com GPS do celular do motorista */}
+        {filters.residents && residentsWithCoords.map((resident) => (
+          <Marker
+            key={`resident-gps-${resident.id}`}
+            position={[resident.lat!, resident.lng!]}
+            icon={residentMarkerIcon(resident)}
+            eventHandlers={{
+              click: () => {
+                setSelectedDetail({
+                  type: 'resident',
+                  data: resident
+                });
               }
             }}
           />
@@ -1153,10 +1456,11 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
               </div>
               <button
                 onClick={() => setSelectedDetail(null)}
-                className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer"
+                title="Voltar"
+                aria-label="Voltar"
               >
-                <ArrowLeft size={14} />
-                <span>Voltar</span>
+                <ArrowLeft size={15} />
               </button>
             </div>
 
@@ -1496,6 +1800,298 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
                 );
               })()}
 
+              {selectedDetail.type === 'driver_sitio' && (() => {
+                const driver = selectedDetail.data as Driver;
+                const linkedTruck = trucks.find(t => t.driverName.toLowerCase() === driver.name.toLowerCase());
+                const lat = driver.homeLat!;
+                const lng = driver.homeLng!;
+                const distanceToTruck = (selectedTruck?.lastLat && selectedTruck?.lastLng)
+                  ? getHaversineDistance(selectedTruck.lastLat, selectedTruck.lastLng, lat, lng)
+                  : null;
+
+                // Entregas mais próximas da residência deste motorista
+                const nearbyDeliveries = deliveries
+                  .filter(d => d.status !== 'DELIVERED')
+                  .map(d => ({
+                    ...d,
+                    distanceKm: getHaversineDistance(lat, lng, d.lat, d.lng)
+                  }))
+                  .sort((a, b) => a.distanceKm - b.distanceKm)
+                  .slice(0, 3);
+
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-3">
+                      <div className="p-3 bg-emerald-100 rounded-2xl text-emerald-800 border border-emerald-200 flex-shrink-0 text-xl font-bold shadow-sm">
+                        🏡
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                          Residência / Sítio do Motorista
+                        </span>
+                        <h3 className="font-extrabold text-slate-900 text-base leading-tight mt-1">{driver.homeSitio || 'Sítio do Motorista'}</h3>
+                        <p className="text-xs text-slate-600 font-bold mt-0.5">
+                          Motorista: <span className="text-emerald-950 font-black">{driver.name}</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <hr className="border-slate-100" />
+
+                    {/* Badge de GPS do Celular */}
+                    <div className="bg-emerald-50/70 p-3.5 rounded-2xl border border-emerald-200/80 space-y-1">
+                      <div className="flex items-center gap-1.5 text-emerald-900 font-black text-xs">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                        <span>Mapeado via GPS do Celular</span>
+                      </div>
+                      <p className="text-[11px] text-emerald-800 font-medium">
+                        {driver.homeGpsSavedAt 
+                          ? `Localização salva em ${new Date(driver.homeGpsSavedAt).toLocaleDateString()} às ${new Date(driver.homeGpsSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` 
+                          : 'Coordenadas salvas no aplicativo'}
+                        {driver.homeGpsAccuracy && ` (Precisão: ±${driver.homeGpsAccuracy.toFixed(0)}m)`}
+                      </p>
+                    </div>
+
+                    {/* Informações de contato e base */}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                        <p className="text-[9px] font-black uppercase text-slate-400">Setor Atendido</p>
+                        <p className="font-bold text-slate-800 mt-0.5 truncate">{driver.sector || 'Todos os setores'}</p>
+                      </div>
+                      <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                        <p className="text-[9px] font-black uppercase text-slate-400">Caminhão Vinculado</p>
+                        <p className="font-bold text-slate-800 mt-0.5 truncate">
+                          {linkedTruck ? `🚛 ${linkedTruck.plate}` : 'Nenhum'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Coordenadas */}
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 font-mono text-xs">
+                      <p className="text-[9px] font-black font-sans uppercase text-slate-400">Coordenadas da Residência</p>
+                      <p className="font-bold text-slate-700 mt-0.5">{lat.toFixed(6)}, {lng.toFixed(6)}</p>
+                    </div>
+
+                    {/* Proximidade */}
+                    {distanceToTruck !== null && (
+                      <div className="bg-blue-50 border border-blue-200/80 p-3 rounded-xl flex items-center justify-between">
+                        <div>
+                          <p className="text-[9px] font-black uppercase text-blue-800">Distância até o Caminhão</p>
+                          <p className="text-sm font-black text-blue-950 mt-0.5">{distanceToTruck.toFixed(2)} km</p>
+                        </div>
+                        <Navigation size={18} className="text-blue-600" />
+                      </div>
+                    )}
+
+                    {/* Entregas Próximas */}
+                    {nearbyDeliveries.length > 0 && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                          Entregas mais próximas deste Sítio:
+                        </p>
+                        <div className="space-y-1">
+                          {nearbyDeliveries.map(d => (
+                            <div key={d.id} className="p-2 bg-slate-50 border border-slate-200/60 rounded-xl flex justify-between items-center text-xs">
+                              <div className="min-w-0 pr-2">
+                                <p className="font-bold text-slate-800 truncate">{d.residentName}</p>
+                                <p className="text-[10px] text-slate-500 truncate">{d.address}</p>
+                              </div>
+                              <span className="font-black text-emerald-700 shrink-0 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 text-[10px]">
+                                {d.distanceKm.toFixed(1)} km
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Botões de Ação */}
+                    <div className="space-y-2 !mt-5">
+                      {driver.phone && (
+                        <a
+                          href={`tel:${driver.phone}`}
+                          className="flex items-center justify-center gap-2 w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white rounded-xl font-black uppercase tracking-wider text-xs transition-all shadow-md shadow-emerald-600/20"
+                        >
+                          <Phone size={14} /> Ligar ({driver.phone})
+                        </a>
+                      )}
+                      <a
+                        href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-2 w-full py-2.5 bg-amber-500 hover:bg-amber-400 active:scale-[0.98] text-amber-950 rounded-xl font-black uppercase tracking-wider text-xs transition-all"
+                      >
+                        <ExternalLink size={14} /> Abrir no Google Maps / Street View
+                      </a>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${lat}, ${lng}`);
+                        }}
+                        className="flex items-center justify-center gap-2 w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs border border-slate-200 transition-all cursor-pointer"
+                      >
+                        Copiar Coordenadas GPS
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {selectedDetail.type === 'resident' && (() => {
+                const resident = selectedDetail.data as Resident;
+                const isSchool = resident.category === 'SCHOOL';
+                const isDaycare = resident.category === 'DAYCARE';
+                const lat = resident.lat!;
+                const lng = resident.lng!;
+                const distanceToTruck = (selectedTruck?.lastLat && selectedTruck?.lastLng)
+                  ? getHaversineDistance(selectedTruck.lastLat, selectedTruck.lastLng, lat, lng)
+                  : null;
+
+                const activeDeliveryForResident = deliveries.find(d => 
+                  (d.residentId && d.residentId === resident.id) ||
+                  (d.residentName && d.residentName.trim().toLowerCase() === resident.name.trim().toLowerCase())
+                );
+
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-3">
+                      <div className={`p-3 rounded-2xl flex-shrink-0 text-xl font-bold shadow-sm ${
+                        isSchool ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' :
+                        isDaycare ? 'bg-pink-100 text-pink-800 border border-pink-200' :
+                        'bg-sky-100 text-sky-800 border border-sky-200'
+                      }`}>
+                        {isSchool ? '🏫' : isDaycare ? '👶' : '👤'}
+                      </div>
+                      <div className="min-w-0">
+                        <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                          isSchool ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
+                          isDaycare ? 'bg-pink-50 text-pink-700 border-pink-200' :
+                          'bg-sky-50 text-sky-700 border-sky-200'
+                        }`}>
+                          {isSchool ? 'Escola Municipal' : isDaycare ? 'Creche' : 'Morador Cadastrado'}
+                        </span>
+                        <h3 className="font-extrabold text-slate-900 text-base leading-tight mt-1">{resident.name}</h3>
+                        <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                          {resident.neighborhood || resident.address || 'Inhapi - AL'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <hr className="border-slate-100" />
+
+                    {/* Badge de GPS Salvo via Celular do Motorista */}
+                    <div className="bg-sky-50/80 p-3.5 rounded-2xl border border-sky-200/80 space-y-1">
+                      <div className="flex items-center gap-1.5 text-sky-950 font-black text-xs">
+                        <span className="w-2 h-2 rounded-full bg-sky-500 animate-ping" />
+                        <span>Mapeado via GPS do Celular</span>
+                      </div>
+                      <p className="text-[11px] text-sky-800 font-medium">
+                        Localização salva via GPS do motorista. Visível para o secretário e todos os motoristas.
+                      </p>
+                    </div>
+
+                    {/* Detalhes de Endereço e Referência */}
+                    <div className="space-y-2 text-xs">
+                      <div className="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                        <p className="text-[9px] font-black uppercase text-slate-400">Endereço Completo</p>
+                        <p className="font-bold text-slate-800 mt-0.5">{resident.address || '—'}</p>
+                      </div>
+
+                      {resident.referencePoint && (
+                        <div className="bg-amber-50/70 p-3 rounded-xl border border-amber-200/60">
+                          <p className="text-[9px] font-black uppercase text-amber-800 flex items-center gap-1">
+                            <MapPin size={11} className="text-amber-600" /> Ponto de Referência
+                          </p>
+                          <p className="font-bold text-amber-950 mt-0.5">{resident.referencePoint}</p>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                          <p className="text-[9px] font-black uppercase text-slate-400">Setor / Região</p>
+                          <p className="font-bold text-slate-800 mt-0.5 truncate">{resident.sector || resident.neighborhood || 'Geral'}</p>
+                        </div>
+                        {resident.councilman && (
+                          <div className="bg-purple-50 p-2.5 rounded-xl border border-purple-100">
+                            <p className="text-[9px] font-black uppercase text-purple-700">Indicação</p>
+                            <p className="font-bold text-purple-900 mt-0.5 truncate">{resident.councilman}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Coordenadas */}
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 font-mono text-xs">
+                      <p className="text-[9px] font-black font-sans uppercase text-slate-400">Coordenadas GPS</p>
+                      <p className="font-bold text-slate-700 mt-0.5">{lat.toFixed(6)}, {lng.toFixed(6)}</p>
+                    </div>
+
+                    {/* Distância até o caminhão */}
+                    {distanceToTruck !== null && (
+                      <div className="bg-emerald-50 border border-emerald-200/80 p-3 rounded-xl flex items-center justify-between">
+                        <div>
+                          <p className="text-[9px] font-black uppercase text-emerald-800">Distância do Caminhão</p>
+                          <p className="text-sm font-black text-emerald-950 mt-0.5">{distanceToTruck.toFixed(2)} km</p>
+                        </div>
+                        <Navigation size={18} className="text-emerald-600" />
+                      </div>
+                    )}
+
+                    {/* Status de Entrega Atual */}
+                    {activeDeliveryForResident && (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs flex items-center justify-between">
+                        <div>
+                          <span className="text-[9px] font-black uppercase text-amber-800">Entrega Cadastrada</span>
+                          <p className="font-bold text-amber-950">{activeDeliveryForResident.status === 'IN_ROUTE' ? 'Em Rota com motorista' : 'Pendente na fila'}</p>
+                        </div>
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                      </div>
+                    )}
+
+                    {/* Ações */}
+                    <div className="space-y-2 !mt-5">
+                      {!isDriver && onSelectResidentForDelivery && (
+                        <button
+                          onClick={() => {
+                            onSelectResidentForDelivery(resident);
+                            setSelectedDetail(null);
+                          }}
+                          className="flex items-center justify-center gap-2 w-full py-3 bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white rounded-xl font-black uppercase tracking-wider text-xs transition-all shadow-md shadow-blue-600/20 cursor-pointer"
+                        >
+                          <Plus size={15} /> Nova Entrega para este Morador
+                        </button>
+                      )}
+
+                      {resident.phone && (
+                        <a
+                          href={`tel:${resident.phone}`}
+                          className="flex items-center justify-center gap-2 w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white rounded-xl font-black uppercase tracking-wider text-xs transition-all shadow-sm"
+                        >
+                          <Phone size={14} /> Ligar ({resident.phone})
+                        </a>
+                      )}
+
+                      <a
+                        href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-2 w-full py-2.5 bg-amber-500 hover:bg-amber-400 active:scale-[0.98] text-amber-950 rounded-xl font-black uppercase tracking-wider text-xs transition-all"
+                      >
+                        <ExternalLink size={14} /> Abrir no Google Maps / Street View
+                      </a>
+
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${lat}, ${lng}`);
+                        }}
+                        className="flex items-center justify-center gap-2 w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs border border-slate-200 transition-all cursor-pointer"
+                      >
+                        Copiar Coordenadas GPS
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {selectedDetail.type === 'user_location' && (() => {
                 const pos = selectedDetail.data;
                 return (
@@ -1514,7 +2110,363 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Botão Compacto Flutuante de Camadas - Acima de Registrar Novo Local */}
+      <div 
+        className={`absolute ${isDriver ? 'bottom-[70px] sm:bottom-[84px] right-3 sm:right-5' : 'bottom-3 sm:bottom-5 right-3 sm:right-5'} z-[1040] pointer-events-auto`}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowLayersModal(prev => {
+              const next = !prev;
+              if (next) handleUserActivity();
+              return next;
+            });
+          }}
+          className={`h-10 sm:h-11 px-3 sm:px-3.5 rounded-2xl shadow-xl backdrop-blur-md border flex items-center gap-2 transition-all active:scale-95 cursor-pointer text-xs font-bold ${
+            showLayersModal 
+              ? 'bg-blue-600 border-blue-400 text-white shadow-blue-500/25 ring-2 ring-blue-400/40' 
+              : 'bg-slate-900/95 hover:bg-slate-800 text-white border-slate-700/80'
+          }`}
+          title={showLayersModal ? "Ocultar painel de camadas" : "Abrir painel de camadas"}
+        >
+          <div className={`w-5 h-5 rounded-lg flex items-center justify-center shrink-0 ${showLayersModal ? 'bg-white/20 text-white' : 'bg-blue-500/20 text-blue-400'}`}>
+            <Layers size={14} />
+          </div>
+          <span className="tracking-wide">Camadas</span>
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-black leading-none ${showLayersModal ? 'bg-white text-blue-900' : 'bg-blue-600 text-white'}`}>
+            {activeLayersCount}
+          </span>
+        </button>
       </div>
+
+      {/* Tela Grande de Seleção de Opções de Camadas que Diminui Automaticamente */}
+      <AnimatePresence>
+        {showLayersModal && (
+          <div 
+            className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[2000] flex items-center justify-center p-3 sm:p-5"
+            onClick={() => setShowLayersModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 16 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.85, opacity: 0, y: 16 }}
+              transition={{ type: "spring", stiffness: 350, damping: 28 }}
+              onMouseEnter={handleUserActivity}
+              onMouseMove={handleUserActivity}
+              onTouchStart={handleUserActivity}
+              onTouchMove={handleUserActivity}
+              onPointerDown={handleUserActivity}
+              onScroll={handleUserActivity}
+              onMouseLeave={() => {
+                setIsInteractingWithModal(false);
+              }}
+              onTouchEnd={() => {
+                if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+                idleTimerRef.current = setTimeout(() => setIsInteractingWithModal(false), 3000);
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleUserActivity();
+              }}
+              className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-6 max-w-xl w-full shadow-2xl border border-slate-200/90 max-h-[90vh] flex flex-col pointer-events-auto overflow-hidden relative"
+            >
+              {/* Barra de Progresso do Timer de Auto-Minimização (Pausada enquanto o usuário estiver mexendo) */}
+              <div className="absolute top-0 left-0 right-0 h-1.5 bg-slate-100 overflow-hidden">
+                <div 
+                  style={{ width: isInteractingWithModal ? '100%' : `${(countdownSecs / 5) * 100}%` }}
+                  className={`h-full transition-all duration-300 ${isInteractingWithModal ? 'bg-emerald-500' : 'bg-blue-600'}`}
+                />
+              </div>
+
+              {/* Cabeçalho do Modal */}
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-100 mt-1">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 border border-blue-200/50">
+                    <Layers size={20} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+                        Camadas e Filtros do Mapa
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-100 text-blue-700">
+                        {activeLayersCount} ativas
+                      </span>
+                    </div>
+                    {isInteractingWithModal ? (
+                      <p className="text-xs text-emerald-600 font-bold flex items-center gap-1.5 mt-0.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                        <span>Configurando (não fecha enquanto você estiver mexendo)</span>
+                      </p>
+                    ) : (
+                      <p className="text-xs text-slate-500 font-medium flex items-center gap-1.5 mt-0.5">
+                        <Clock size={12} className="text-slate-400 shrink-0" />
+                        <span>Diminui automaticamente em <strong className="text-blue-600 font-bold">{countdownSecs}s</strong> sem toques</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLayersModal(false)}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  title="Minimizar agora"
+                >
+                  <X size={15} />
+                  <span className="hidden sm:inline">Minimizar</span>
+                </button>
+              </div>
+
+              {/* Lista de Opções de Camadas */}
+              <div className="py-3 space-y-2 overflow-y-auto max-h-[58vh] pr-1">
+                {/* 1. Moradores Mapeados via GPS */}
+                <div 
+                  onClick={() => {
+                    toggleFilter('residents');
+                    handleUserActivity();
+                  }}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] select-none ${
+                    filters.residents 
+                      ? 'bg-blue-50/70 border-blue-300 shadow-xs' 
+                      : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base font-bold ${filters.residents ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-200 text-slate-600'}`}>
+                      👤
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs sm:text-sm font-extrabold text-slate-900">Moradores (GPS)</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black ${filters.residents ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                          {residentsWithCoords.length}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Casas e famílias mapeadas com GPS do celular
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${filters.residents ? 'bg-blue-600' : 'bg-slate-300'}`}>
+                    <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${filters.residents ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </div>
+                </div>
+
+                {/* 2. Sítios Motoristas */}
+                <div 
+                  onClick={() => {
+                    toggleFilter('driverSitios');
+                    handleUserActivity();
+                  }}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] select-none ${
+                    filters.driverSitios 
+                      ? 'bg-emerald-50/70 border-emerald-300 shadow-xs' 
+                      : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base font-bold ${filters.driverSitios ? 'bg-emerald-600 text-white shadow-xs' : 'bg-slate-200 text-slate-600'}`}>
+                      🏠
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs sm:text-sm font-extrabold text-slate-900">Sítios dos Motoristas</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black ${filters.driverSitios ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                          {driverSitiosWithCoords.length}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Localização dos sítios onde os motoristas residem
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${filters.driverSitios ? 'bg-emerald-600' : 'bg-slate-300'}`}>
+                    <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${filters.driverSitios ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </div>
+                </div>
+
+                {/* 3. Pontos Gerais */}
+                <div 
+                  onClick={() => {
+                    toggleFilter('sitios');
+                    handleUserActivity();
+                  }}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] select-none ${
+                    filters.sitios 
+                      ? 'bg-purple-50/70 border-purple-300 shadow-xs' 
+                      : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base font-bold ${filters.sitios ? 'bg-purple-600 text-white shadow-xs' : 'bg-slate-200 text-slate-600'}`}>
+                      📍
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs sm:text-sm font-extrabold text-slate-900">Pontos Gerais / Escolas / Creches</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black ${filters.sitios ? 'bg-purple-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                          {filteredSitios.length}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Escolas, creches municipais e pontos comunitários
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${filters.sitios ? 'bg-purple-600' : 'bg-slate-300'}`}>
+                    <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${filters.sitios ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </div>
+                </div>
+
+                {/* 4. Entregas Concluídas GPS */}
+                <div 
+                  onClick={() => {
+                    toggleFilter('delivered');
+                    handleUserActivity();
+                  }}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] select-none ${
+                    filters.delivered 
+                      ? 'bg-teal-50/70 border-teal-300 shadow-xs' 
+                      : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base font-bold ${filters.delivered ? 'bg-teal-600 text-white shadow-xs' : 'bg-slate-200 text-slate-600'}`}>
+                      ✓
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs sm:text-sm font-extrabold text-slate-900">Entregas Concluídas (GPS)</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black ${filters.delivered ? 'bg-teal-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                          {filteredDeliveries.filter(d => d.status === 'DELIVERED').length}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Pontos de entrega de água finalizadas com coordenadas
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${filters.delivered ? 'bg-teal-600' : 'bg-slate-300'}`}>
+                    <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${filters.delivered ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </div>
+                </div>
+
+                {/* 5. Caminhões */}
+                <div 
+                  onClick={() => {
+                    toggleFilter('trucks');
+                    handleUserActivity();
+                  }}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.99] select-none ${
+                    filters.trucks 
+                      ? 'bg-amber-50/70 border-amber-300 shadow-xs' 
+                      : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base font-bold ${filters.trucks ? 'bg-amber-500 text-slate-950 shadow-xs' : 'bg-slate-200 text-slate-600'}`}>
+                      🚛
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs sm:text-sm font-extrabold text-slate-900">Caminhões Pipas</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-black ${filters.trucks ? 'bg-amber-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                          {filteredTrucks.length}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Veículos da Operação Pipa com rastreamento GPS
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${filters.trucks ? 'bg-amber-500' : 'bg-slate-300'}`}>
+                    <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${filters.trucks ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </div>
+                </div>
+
+                {/* 6. Modo Satélite vs Vias */}
+                <div className="pt-2 border-t border-slate-100">
+                  <div className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl border border-slate-200">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-sm shrink-0">
+                        🗺️
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-slate-800">Visualização do Terreno</span>
+                        <p className="text-[10px] text-slate-500">
+                          {mapLayer === 'satellite' ? 'Visão Satélite em alta resolução' : 'Mapa padrão de estradas e vias'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200 shadow-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMapLayer('osmand');
+                          handleUserActivity();
+                        }}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all ${
+                          mapLayer === 'osmand' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Vias
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMapLayer('satellite');
+                          handleUserActivity();
+                        }}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all ${
+                          mapLayer === 'satellite' ? 'bg-purple-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Satélite
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rodapé com Ações Rápidas */}
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 mt-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const allActive = filters.residents && filters.driverSitios && filters.sitios && filters.delivered && filters.trucks;
+                    setFilters(prev => ({
+                      ...prev,
+                      residents: !allActive,
+                      driverSitios: !allActive,
+                      sitios: !allActive,
+                      delivered: !allActive,
+                      trucks: !allActive
+                    }));
+                    handleUserActivity();
+                  }}
+                  className="px-3 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
+                >
+                  {filters.residents && filters.driverSitios && filters.sitios && filters.delivered && filters.trucks
+                    ? 'Desmarcar Todos'
+                    : 'Marcar Todos'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLayersModal(false)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+                >
+                  <span>Concluir</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Caixa de Diálogo Completa: Selecionar Motorista para Rastrear */}
       <AnimatePresence>
@@ -1546,11 +2498,11 @@ export default function MapContainer({ trucks, deliveries, sitios, onMapClick, o
                 </div>
                 <button 
                   onClick={() => setShowDriverSelectorModal(false)} 
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-colors cursor-pointer shrink-0"
                   title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={14} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
 

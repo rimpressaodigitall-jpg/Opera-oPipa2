@@ -28,7 +28,7 @@ export function isRoadRoute(coords?: [number, number][] | null): boolean {
 /**
  * Calculates distance in meters between two lat/lng points (Haversine)
  */
-function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+export function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
@@ -37,6 +37,13 @@ function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Calculates distance in kilometers between two lat/lng points (Haversine)
+ */
+export function getHaversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  return getDistanceMeters(lat1, lon1, lat2, lon2) / 1000;
 }
 
 /**

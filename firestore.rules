@@ -74,5 +74,11 @@ service cloud.firestore {
       allow read: if configId == 'vapid' || isSignedIn();
       allow write: if isSignedIn();
     }
+
+    // Fuel Logs (Abastecimento dos caminhões-pipa e consumo por setor)
+    match /fuel_logs/{logId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn();
+    }
   }
 }

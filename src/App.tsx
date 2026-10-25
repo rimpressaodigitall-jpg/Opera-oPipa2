@@ -10,6 +10,8 @@ import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import AdminApp from './components/AdminApp';
 import DriverApp from './components/DriverApp';
 import AndroidInstallBanner from './components/AndroidInstallBanner';
+import { ThemeProvider } from './lib/theme';
+import { ThemeSelector } from './components/ThemeSelector';
 import { 
   Droplet, 
   LayoutDashboard,
@@ -33,6 +35,14 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 
 export default function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
+  );
+}
+
+function AppContent() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -65,6 +75,7 @@ export default function App() {
   const [newDriverPass, setNewDriverPass] = useState('');
   const [saveMessage, setSaveMessage] = useState('');
   const [isSavingPass, setIsSavingPass] = useState(false);
+  const [adminViewMode, setAdminViewMode] = useState<'dashboard' | 'passwords'>('dashboard');
 
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
     return localStorage.getItem('pipa_admin_auth') === 'true';
@@ -518,13 +529,54 @@ export default function App() {
             <span>Operando de forma estável no <strong>Modo de Contingência Local</strong>. Suas ações e entregas serão salvas no aparelho!</span>
           </div>
         )}
-        <AdminApp onTrocarAcesso={handleTrocarAcesso} />
+        <AdminApp onTrocarAcesso={handleTrocarAcesso} userRole="secretary" />
       </div>
     );
   }
 
-  // Active View: Administrador (Módulo de Configuração de Senhas)
+  // Active View: Administrador (Acesso Completo ao Painel e Abastecimento + Módulo de Senhas)
   if (user && appRole === 'admin' && isAdminAuthenticated) {
+    if (adminViewMode === 'dashboard') {
+      return (
+        <div className="h-screen flex flex-col relative">
+          {quotaExceeded && (
+            <div className="bg-amber-500 text-amber-950 font-semibold text-xs sm:text-sm py-3 px-4 text-center justify-center flex flex-col sm:flex-row items-center gap-2 select-none shadow-md z-[1000] border-b border-amber-600/30">
+              <div className="flex items-center gap-1.5">
+                <AlertCircle size={16} className="shrink-0 stroke-[2.5]" />
+                <strong className="uppercase tracking-wide text-[10px] bg-amber-600/30 px-1.5 py-0.5 rounded">Cota do Firebase Excedida</strong>
+              </div>
+              <span>Operando de forma estável no <strong>Modo de Contingência Local</strong>. Suas ações e entregas serão salvas no aparelho!</span>
+            </div>
+          )}
+          <div className="bg-slate-900 text-white px-3 sm:px-4 py-2 flex items-center justify-between border-b border-slate-800 text-xs shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
+              <span className="font-black uppercase tracking-wider text-[11px] truncate">Painel do Administrador</span>
+              <span className="text-[10px] text-slate-400 hidden sm:inline">• Abastecimento, Consumo & Gestão Global</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setAdminViewMode('passwords')}
+                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer"
+                title="Configurar Senhas de Usuários"
+              >
+                <Key size={12} /> Configurar Senhas
+              </button>
+              <button
+                onClick={handleTrocarAcesso}
+                className="px-2.5 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-400 border border-red-900/40 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer"
+              >
+                <LogOut size={12} /> Sair
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <AdminApp onTrocarAcesso={handleTrocarAcesso} userRole="admin" />
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-[100dvh] bg-slate-950 text-white font-sans flex flex-col justify-between p-3 sm:p-4 relative">
         <div 
@@ -545,12 +597,21 @@ export default function App() {
               <p className="text-[8px] font-black text-cyan-400 tracking-wider uppercase leading-none mt-0.5">Operação Pipa</p>
             </div>
           </div>
-          <button
-            onClick={handleTrocarAcesso}
-            className="flex items-center gap-1.5 px-2 py-1 bg-red-950/40 hover:bg-red-900/60 text-red-400 hover:text-red-300 border border-red-900/40 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer"
-          >
-            <LogOut size={12} /> Sair
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setAdminViewMode('dashboard')}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer shadow-sm"
+            >
+              <LayoutDashboard size={12} /> Abrir Painel
+            </button>
+            <ThemeSelector variant="compact-dark" />
+            <button
+              onClick={handleTrocarAcesso}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-red-950/40 hover:bg-red-900/60 text-red-400 hover:text-red-300 border border-red-900/40 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer"
+            >
+              <LogOut size={12} /> Sair
+            </button>
+          </div>
         </header>
 
         <main className="w-full max-w-md mx-auto flex-1 flex flex-col justify-center py-4 z-10">
@@ -666,10 +727,13 @@ export default function App() {
           {/* Subtle top ambient indicator */}
           <div className={`absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${isAdmin ? 'from-red-600 to-amber-500' : isSecretary ? 'from-blue-600 to-indigo-500' : 'from-cyan-500 to-emerald-500'}`} />
 
-          {/* Role badge */}
-          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide mb-3 bg-slate-800/80 text-slate-300 border border-slate-700/60">
-            {isAdmin ? <Shield size={12} className="text-red-400" /> : isSecretary ? <LayoutDashboard size={12} className="text-blue-400" /> : <Truck size={12} className="text-cyan-400" />}
-            <span>Acesso: {isAdmin ? 'Administração' : isSecretary ? 'Secretaria' : 'Motorista'}</span>
+          {/* Role badge & Theme button */}
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-slate-800/80 text-slate-300 border border-slate-700/60">
+              {isAdmin ? <Shield size={12} className="text-red-400" /> : isSecretary ? <LayoutDashboard size={12} className="text-blue-400" /> : <Truck size={12} className="text-cyan-400" />}
+              <span>Acesso: {isAdmin ? 'Administração' : isSecretary ? 'Secretaria' : 'Motorista'}</span>
+            </div>
+            <ThemeSelector variant="compact-dark" />
           </div>
 
           <div className="flex items-center justify-center mx-auto mb-3">
@@ -748,16 +812,19 @@ export default function App() {
             </div>
           )}
 
-          <div className="mt-6 pt-4 border-t border-slate-800">
+          <div className="mt-6 pt-4 border-t border-slate-800 flex items-center justify-between">
             <button
               onClick={() => {
                 setSelectedAccess(null);
                 setShowPasswordPrompt(false);
               }}
-              className="text-slate-400 hover:text-white font-medium text-[11px] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center border border-slate-800 transition-colors cursor-pointer"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={12} /> Voltar à seleção
+              <ArrowLeft size={15} />
             </button>
+            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Acessar com outro perfil</span>
           </div>
         </motion.div>
       </div>
@@ -787,9 +854,12 @@ export default function App() {
             Gestão Hídrica • Inhapi / AL
           </p>
 
-          <div className="inline-flex items-center gap-1.5 mt-2 px-2.5 py-0.5 rounded-full bg-slate-900/60 border border-slate-800 text-[9px] font-bold text-slate-300">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
-            <span>Selecione seu perfil de acesso</span>
+          <div className="flex items-center justify-center gap-2 mt-2.5">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/60 border border-slate-800 text-[9px] font-bold text-slate-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
+              <span>Selecione seu perfil de acesso</span>
+            </div>
+            <ThemeSelector variant="compact-dark" />
           </div>
         </div>
 
@@ -922,8 +992,26 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0, y: 16 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 16 }}
-              className="bg-slate-900 p-4 sm:p-5 rounded-2xl w-full max-w-xs shadow-2xl border border-slate-800 max-h-[92dvh] overflow-y-auto space-y-3"
+              className="bg-slate-900 p-4 sm:p-5 rounded-2xl w-full max-w-xs shadow-2xl border border-slate-800 max-h-[92dvh] overflow-y-auto space-y-3 relative"
             >
+              <div className="flex items-center justify-between mb-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPasswordPrompt(false);
+                    setSelectedAccess(null);
+                    setAdminPassword('');
+                    setPasswordError('');
+                  }}
+                  className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center transition-colors cursor-pointer border border-slate-700 shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
+                >
+                  <ArrowLeft size={15} />
+                </button>
+                <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">Inhapi • AL</span>
+              </div>
+
               <div className="flex items-center justify-center mx-auto">
                 <img 
                   src="/brasao-inhapi.svg" 
@@ -1000,18 +1088,6 @@ export default function App() {
                 >
                   <span>Entrar</span>
                   <ChevronRight size={14} />
-                </button>
-
-                <button 
-                  onClick={() => {
-                    setShowPasswordPrompt(false);
-                    setSelectedAccess(null);
-                    setAdminPassword('');
-                    setPasswordError('');
-                  }}
-                  className="w-full text-slate-400 hover:text-slate-200 font-bold py-1 text-[10px] uppercase tracking-wider transition-colors cursor-pointer"
-                >
-                  Voltar
                 </button>
               </div>
             </motion.div>

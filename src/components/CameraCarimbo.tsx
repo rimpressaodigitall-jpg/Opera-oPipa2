@@ -178,10 +178,11 @@ export default function CameraCarimbo({
               if (stream) stream.getTracks().forEach(track => track.stop());
               onClose();
             }}
-            className="px-2.5 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-bold flex items-center gap-1 transition-colors active:scale-95 cursor-pointer"
+            className="w-8 h-8 bg-white/10 hover:bg-white/20 text-white rounded-xl flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
+            title="Voltar"
+            aria-label="Voltar"
           >
-            <ArrowLeft size={13} />
-            <span>Voltar</span>
+            <ArrowLeft size={16} />
           </button>
           <button
             onClick={() => {

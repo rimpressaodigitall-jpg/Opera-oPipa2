@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   collection, 
   query, 
@@ -12,7 +12,7 @@ import {
   setDoc
 } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
-import { Truck, Delivery, DeliveryStatus, TruckStatus, Sitio, Councilman } from '../types';
+import { Truck, Delivery, DeliveryStatus, TruckStatus, Sitio, Councilman, Resident, Driver } from '../types';
 import MapContainer from './MapContainer';
 import { 
   Navigation, 
@@ -37,13 +37,14 @@ import {
   School,
   Baby,
   ArrowLeft,
-  User
+  LocateFixed
 } from 'lucide-react';
 import { motion, AnimatePresence, useDragControls } from 'motion/react';
 import { offlineDb } from '../lib/offlineDb';
 import { fetchRoadRoute, WATER_SUPPLY_POINT, isRoadRoute } from '../lib/routing';
 import AndroidInstallBanner from './AndroidInstallBanner';
 import CameraCarimbo from './CameraCarimbo';
+import ThemeSelector from './ThemeSelector';
 
 function getDistanceInMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371000; // Radius of the Earth in meters
@@ -66,6 +67,8 @@ export default function DriverApp({
 } = {}) {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [sitios, setSitios] = useState<Sitio[]>([]);
+  const [residents, setResidents] = useState<Resident[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
   const [assignedTruck, setAssignedTruck] = useState<Truck | null>(null);
   const [allTrucks, setAllTrucks] = useState<Truck[]>([]);
   const [selectedTruckId, setSelectedTruckId] = useState<string | null>(() => {
@@ -81,6 +84,8 @@ export default function DriverApp({
   const [isCustomCouncilman, setIsCustomCouncilman] = useState(false);
   const [councilmen, setCouncilmen] = useState<Councilman[]>([]);
   const [isRefreshingGps, setIsRefreshingGps] = useState(false);
+  const [driverFlyTarget, setDriverFlyTarget] = useState<[number, number] | null>(null);
+  const [lastGpsSyncTime, setLastGpsSyncTime] = useState<Date>(new Date());
   
   const lastDbUpdateRef = useRef<{ lat: number, lng: number, time: number } | null>(null);
   
@@ -94,7 +99,18 @@ export default function DriverApp({
   const [completedNeighborhood, setCompletedNeighborhood] = useState('');
   const [saveToResidentsRegister, setSaveToResidentsRegister] = useState(true);
 
+  // States for Driver Home Sítio (Meu Sítio via GPS)
+  const [showDriverSitioModal, setShowDriverSitioModal] = useState(false);
+  const [homeSitioInput, setHomeSitioInput] = useState('');
+  const [isSavingHomeSitio, setIsSavingHomeSitio] = useState(false);
   const [isCustomCameraOpen, setIsCustomCameraOpen] = useState(false);
+
+  const currentDriver = useMemo(() => {
+    return drivers.find(d => 
+      (assignedTruck?.driverName && d.name.toLowerCase() === assignedTruck.driverName.toLowerCase()) ||
+      (assignedTruck?.driverId && d.id === assignedTruck.driverId)
+    ) || null;
+  }, [drivers, assignedTruck]);
 
   const handleTriggerCamera = () => {
     setIsCustomCameraOpen(true);
@@ -414,6 +430,16 @@ export default function DriverApp({
       setCouncilmen(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Councilman)));
     }, handleErr('councilmen'));
 
+    const qResidents = query(collection(db, 'residents'));
+    const unsubResidents = onSnapshot(qResidents, (snap) => {
+      setResidents(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Resident)));
+    }, handleErr('residents'));
+
+    const qDrivers = query(collection(db, 'drivers'));
+    const unsubDrivers = onSnapshot(qDrivers, (snap) => {
+      setDrivers(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Driver)));
+    }, handleErr('drivers'));
+
     const watchId = navigator.geolocation.watchPosition(
       (pos) => setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       (err) => console.error(err),
@@ -424,6 +450,8 @@ export default function DriverApp({
       unsubTrucks();
       unsubSitios();
       unsubCouncilmen();
+      unsubResidents();
+      unsubDrivers();
       navigator.geolocation.clearWatch(watchId);
     };
   }, []);
@@ -603,6 +631,7 @@ export default function DriverApp({
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
         setLocation({ lat, lng });
+        setLastGpsSyncTime(new Date());
 
         if (assignedTruck) {
           try {
@@ -662,14 +691,76 @@ export default function DriverApp({
     );
   }, [assignedTruck, isOnline]);
 
-  // Timer automático para forçar atualização da localização GPS do motorista a cada 60 segundos
+  // Botão Minha Localidade: consulta GPS do dispositivo em alta precisão e voa o mapa instantaneamente para o local atual
+  const handleCenterMyLocation = useCallback(() => {
+    setIsRefreshingGps(true);
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          setLocation({ lat, lng });
+          setDriverFlyTarget([lat, lng]);
+          setLastGpsSyncTime(new Date());
+          setIsRefreshingGps(false);
+
+          if (assignedTruck) {
+            try {
+              if (isOnline && auth.currentUser) {
+                await updateDoc(doc(db, 'trucks', assignedTruck.id), {
+                  lastLat: lat,
+                  lastLng: lng,
+                  lastUpdate: new Date().toISOString()
+                });
+                lastDbUpdateRef.current = { lat, lng, time: Date.now() };
+              }
+            } catch (err) {
+              console.warn("Aviso ao salvar localização GPS:", err);
+            }
+          }
+
+          setShowNotificationToast({
+            show: true,
+            title: "Minha Localidade",
+            body: "Mapa centralizado com sucesso na sua posição atual!"
+          });
+          setTimeout(() => setShowNotificationToast({ show: false, title: '', body: '' }), 3000);
+        },
+        (err) => {
+          console.warn("Erro ao buscar GPS do motorista:", err);
+          setIsRefreshingGps(false);
+          if (location) {
+            setDriverFlyTarget([location.lat, location.lng]);
+            setShowNotificationToast({
+              show: true,
+              title: "Minha Localidade",
+              body: "Levado para a última coordenada salva."
+            });
+          } else {
+            setShowNotificationToast({
+              show: true,
+              title: "GPS Indisponível",
+              body: "Ative a localização do celular para centralizar o mapa."
+            });
+          }
+          setTimeout(() => setShowNotificationToast({ show: false, title: '', body: '' }), 3500);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    } else if (location) {
+      setDriverFlyTarget([location.lat, location.lng]);
+      setIsRefreshingGps(false);
+    }
+  }, [assignedTruck, isOnline, location]);
+
+  // Atualização automática via GPS a cada minuto (60 segundos)
   useEffect(() => {
-    if (!assignedTruck) return;
+    if (!assignedTruck?.id) return;
 
     // Força uma atualização inicial
     forceUpdateGPS(false);
 
-    // Timer de 60 segundos garantindo que o rastreamento em tempo real do administrador seja sempre preciso
+    // Timer de 60 segundos (1 minuto) automático contínuo
     const gpsTimerId = setInterval(() => {
       forceUpdateGPS(false);
     }, 60000);
@@ -792,13 +883,22 @@ export default function DriverApp({
 
     try {
       if (isOnline) {
+        const latVal = Number(exactLat || location?.lat || -9.2201);
+        const lngVal = Number(exactLng || location?.lng || -36.3503);
+
         const dUpdate: any = { 
           status,
           completedAt: status === 'DELIVERED' ? new Date().toISOString() : null,
           photo: photo || null
         };
-        if (exactLat !== undefined) dUpdate.lat = exactLat;
-        if (exactLng !== undefined) dUpdate.lng = exactLng;
+        if (exactLat !== undefined || location?.lat) {
+          dUpdate.lat = latVal;
+          dUpdate.lng = lngVal;
+          if (status === 'DELIVERED') {
+            dUpdate.deliveredLat = latVal;
+            dUpdate.deliveredLng = lngVal;
+          }
+        }
         if (updatedName !== undefined) dUpdate.residentName = updatedName;
         if (updatedAddr !== undefined) dUpdate.address = updatedAddr;
 
@@ -811,10 +911,31 @@ export default function DriverApp({
           });
         }
 
+        // Se a entrega foi finalizada, registra permanentemente como ponto no mapa (coleção 'sitios')
+        if (status === 'DELIVERED') {
+          try {
+            const sitioName = updatedName || deliveryToComplete?.residentName || 'Ponto de Entrega';
+            const sitioDesc = `Abastecimento concluído por ${assignedTruck?.driverName || 'Motorista'} (${assignedTruck?.plate || 'Pipa'}) - ${updatedAddr || deliveryToComplete?.address || ''}`;
+            await addDoc(collection(db, 'sitios'), {
+              name: sitioName,
+              description: sitioDesc,
+              lat: latVal,
+              lng: lngVal,
+              type: 'RESIDENT',
+              fuelType: 'NONE',
+              referencePoint: deliveryToComplete?.referencePoint || '',
+              councilman: deliveryToComplete?.councilman || '',
+              deliveredAt: new Date().toISOString(),
+              deliveryId: deliveryId,
+              createdAt: new Date().toISOString()
+            });
+          } catch (sErr) {
+            console.warn("Aviso ao salvar marcação do sítio no mapa:", sErr);
+          }
+        }
+
         // Adiciona ou atualiza no cadastro do administrador se solicitado
         if (isRegisterResident && updatedName && updatedAddr) {
-          const latVal = exactLat || (location?.lat ?? -9.2201);
-          const lngVal = exactLng || (location?.lng ?? -36.3503);
           const neighborhoodVal = updatedNeighborhood || 'Zona Rural';
           try {
             let updated = false;
@@ -863,6 +984,25 @@ export default function DriverApp({
       } else {
         await offlineDb.addAction('delivery_complete', payload);
 
+        const latVal = Number(exactLat || location?.lat || -9.2201);
+        const lngVal = Number(exactLng || location?.lng || -36.3503);
+
+        if (status === 'DELIVERED') {
+          await offlineDb.addAction('sitio_add', {
+            name: updatedName || deliveryToComplete?.residentName || 'Ponto de Entrega',
+            description: `Abastecimento concluído por ${assignedTruck?.driverName || 'Motorista'} - ${updatedAddr || deliveryToComplete?.address || ''}`,
+            lat: latVal,
+            lng: lngVal,
+            type: 'RESIDENT',
+            fuelType: 'NONE',
+            referencePoint: deliveryToComplete?.referencePoint || '',
+            councilman: deliveryToComplete?.councilman || '',
+            deliveredAt: new Date().toISOString(),
+            deliveryId: deliveryId,
+            createdAt: new Date().toISOString()
+          });
+        }
+
         if (isRegisterResident && updatedName && updatedAddr) {
           const residentPayload = {
             id: deliveryToComplete?.residentId || null,
@@ -870,8 +1010,8 @@ export default function DriverApp({
             address: updatedAddr,
             neighborhood: updatedNeighborhood || 'Zona Rural',
             phone: '',
-            lat: exactLat || (location?.lat ?? -9.2201),
-            lng: exactLng || (location?.lng ?? -36.3503)
+            lat: latVal,
+            lng: lngVal
           };
           await offlineDb.addAction('resident_add', residentPayload);
         }
@@ -881,7 +1021,7 @@ export default function DriverApp({
         setShowNotificationToast({ 
           show: true, 
           title: "Salvo com Sucesso (Offline)", 
-          body: "Entrega e local salvos com sucesso no celular! Assim que a internet for reestabelecida, serão atualizados no banco de dados para o administrador ter acesso." 
+          body: "Entrega e ponto salvos com sucesso no celular! Assim que a internet for reestabelecida, serão atualizados no banco de dados para o administrador ter acesso." 
         });
         setTimeout(() => setShowNotificationToast({ show: false, title: '', body: '' }), 5000);
       }
@@ -927,6 +1067,103 @@ export default function DriverApp({
     setNewSitioType('RESIDENT');
   };
 
+  const handleSaveDriverHomeSitio = async () => {
+    const sitioClean = homeSitioInput.trim();
+    if (!sitioClean) {
+      setShowNotificationToast({ 
+        show: true, 
+        title: "Nome Obrigatório", 
+        body: "Por favor, digite o nome do sítio ou comunidade onde você mora." 
+      });
+      return;
+    }
+
+    setIsSavingHomeSitio(true);
+    try {
+      let lat = location?.lat;
+      let lng = location?.lng;
+      let accuracy = 15;
+
+      if (navigator.geolocation) {
+        try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 10000,
+              maximumAge: 0
+            });
+          });
+          lat = pos.coords.latitude;
+          lng = pos.coords.longitude;
+          accuracy = pos.coords.accuracy || 10;
+        } catch {
+          // fallback to already captured location
+        }
+      }
+
+      if (!lat || !lng) {
+        setShowNotificationToast({ 
+          show: true, 
+          title: "GPS Não Detectado", 
+          body: "Não foi possível obter sua coordenada GPS. Ative o GPS nas configurações do celular e tente novamente." 
+        });
+        setIsSavingHomeSitio(false);
+        return;
+      }
+
+      const driverPayload = {
+        homeSitio: sitioClean,
+        homeLat: lat,
+        homeLng: lng,
+        homeGpsSavedAt: new Date().toISOString(),
+        homeGpsAccuracy: accuracy
+      };
+
+      // 1. Atualizar ou criar o registro do motorista
+      if (currentDriver?.id) {
+        await updateDoc(doc(db, 'drivers', currentDriver.id), driverPayload);
+      } else if (assignedTruck?.driverName) {
+        await addDoc(collection(db, 'drivers'), {
+          name: assignedTruck.driverName,
+          phone: '',
+          sector: assignedTruck.sector || '',
+          address: `Sítio ${sitioClean}`,
+          ...driverPayload
+        });
+      }
+
+      // 2. Atualizar também no caminhão vinculado
+      if (assignedTruck?.id) {
+        await updateDoc(doc(db, 'trucks', assignedTruck.id), {
+          driverHomeSitio: sitioClean,
+          driverHomeLat: lat,
+          driverHomeLng: lng
+        });
+        setAssignedTruck(prev => prev ? ({
+          ...prev,
+          driverHomeSitio: sitioClean,
+          driverHomeLat: lat,
+          driverHomeLng: lng
+        }) : null);
+      }
+
+      setShowNotificationToast({ 
+        show: true, 
+        title: "Sítio Salvo com Sucesso!", 
+        body: `Localização do seu sítio (${sitioClean}) salva via GPS! Agora o secretário e seus colegas conseguem visualizar seu sítio no mapa.` 
+      });
+      setShowDriverSitioModal(false);
+    } catch (err: any) {
+      setShowNotificationToast({ 
+        show: true, 
+        title: "Erro ao Salvar Sítio", 
+        body: err.message || "Falha na gravação dos dados." 
+      });
+    } finally {
+      setIsSavingHomeSitio(false);
+    }
+  };
+
   const handleRegisterCurrentLocation = async () => {
     if (!location || !newSitioName.trim()) return;
 
@@ -941,13 +1178,16 @@ export default function DriverApp({
     };
     const titleLabel = typeLabels[newSitioType] || 'Local';
 
+    const latVal = Number(location.lat);
+    const lngVal = Number(location.lng);
+
     const residentPayload: any = {
       name: nameTrimmed,
       address: sitioTrimmed ? `Sítio ${sitioTrimmed}` : 'Adicionado C/ Localização',
       neighborhood: sitioTrimmed || 'Não Informado',
       phone: '',
-      lat: location.lat,
-      lng: location.lng,
+      lat: latVal,
+      lng: lngVal,
       referencePoint: newSitioReferencePoint.trim(),
       councilman: councilmanTrimmed,
       category: newSitioType
@@ -956,11 +1196,14 @@ export default function DriverApp({
     const sitioPayload: any = {
       name: nameTrimmed,
       description: `${titleLabel} registrada(o) por ${assignedTruck?.driverName || 'Motorista'}${sitioTrimmed ? ` - Sítio ${sitioTrimmed}` : ''}`,
-      lat: location.lat,
-      lng: location.lng,
+      lat: latVal,
+      lng: lngVal,
       type: newSitioType,
       fuelType: 'NONE',
-      referencePoint: newSitioReferencePoint.trim()
+      referencePoint: newSitioReferencePoint.trim(),
+      councilman: councilmanTrimmed,
+      createdBy: assignedTruck?.driverName || 'Motorista',
+      createdAt: new Date().toISOString()
     };
 
     try {
@@ -968,21 +1211,17 @@ export default function DriverApp({
         // Cadastra como destinatário para entregas de água
         await addDoc(collection(db, 'residents'), residentPayload);
 
-        // Se for Escola ou Creche, cadastra também em sítios/locais para marcação fixa no mapa
-        if (newSitioType === 'SCHOOL' || newSitioType === 'DAYCARE') {
-          await addDoc(collection(db, 'sitios'), sitioPayload);
-        }
+        // Cadastra também permanentemente em sítios para marcação fixa no mapa
+        await addDoc(collection(db, 'sitios'), sitioPayload);
 
         setShowNotificationToast({ 
           show: true, 
           title: "Sucesso", 
-          body: `${titleLabel} registrado(a) com sucesso!${councilmanTrimmed ? ` (Indicação: ${councilmanTrimmed})` : ''}` 
+          body: `${titleLabel} registrado(a) com sucesso no mapa e no sistema!${councilmanTrimmed ? ` (Indicação: ${councilmanTrimmed})` : ''}` 
         });
       } else {
         await offlineDb.addAction('resident_add', residentPayload);
-        if (newSitioType === 'SCHOOL' || newSitioType === 'DAYCARE') {
-          await offlineDb.addAction('sitio_add', sitioPayload);
-        }
+        await offlineDb.addAction('sitio_add', sitioPayload);
         const actions = await offlineDb.getAllActions();
         setPendingSyncCount(actions.length);
         setShowNotificationToast({ 
@@ -993,9 +1232,7 @@ export default function DriverApp({
       }
     } catch (e) {
       await offlineDb.addAction('resident_add', residentPayload);
-      if (newSitioType === 'SCHOOL' || newSitioType === 'DAYCARE') {
-        await offlineDb.addAction('sitio_add', sitioPayload);
-      }
+      await offlineDb.addAction('sitio_add', sitioPayload);
       const actions = await offlineDb.getAllActions();
       setPendingSyncCount(actions.length);
       setShowNotificationToast({ 
@@ -1098,14 +1335,15 @@ export default function DriverApp({
         />
         
         <header className="w-full max-w-lg mx-auto text-center pt-4 z-10 relative">
+          <ThemeSelector variant="compact-light" className="absolute top-4 right-0" />
           {onTrocarAcesso && (
             <button
               onClick={onTrocarAcesso}
-              className="absolute top-4 left-0 px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1 shadow-xs transition-all active:scale-95 cursor-pointer"
+              className="absolute top-4 left-0 w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer"
               title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={14} />
-              <span>Voltar</span>
+              <ArrowLeft size={16} />
             </button>
           )}
           <div className="flex items-center justify-center mx-auto">
@@ -1169,14 +1407,8 @@ export default function DriverApp({
           </div>
         </main>
 
-        <footer className="w-full max-w-lg mx-auto text-center pb-4 z-10">
-          <button
-            onClick={onTrocarAcesso}
-            className="inline-flex items-center gap-1.5 text-slate-400 hover:text-slate-600 font-black uppercase tracking-wider text-xs transition-colors"
-          >
-            <ArrowLeft size={14} /> Voltar para seleção de acesso
-          </button>
-        </footer>
+        {/* Footer padding */}
+        <div className="pb-2" />
       </div>
     );
   }
@@ -1221,11 +1453,11 @@ export default function DriverApp({
               setSelectedTruckId(null);
               setAssignedTruck(null);
             }}
-            className="h-8 px-2 bg-slate-900 hover:bg-slate-800 text-slate-200 rounded-xl shadow-sm font-bold text-[11px] transition-all active:scale-95 flex items-center gap-1 border border-slate-700/70 cursor-pointer shrink-0"
+            className="w-8 h-8 sm:w-9 sm:h-9 bg-slate-900 hover:bg-slate-800 text-cyan-400 rounded-xl shadow-sm transition-all active:scale-95 flex items-center justify-center border border-slate-700/70 cursor-pointer shrink-0"
             title="Voltar para seleção de motorista"
+            aria-label="Voltar para seleção de motorista"
           >
-            <ArrowLeft size={13} className="text-cyan-400" />
-            <span>Voltar</span>
+            <ArrowLeft size={16} />
           </button>
           <img 
             src="/brasao-inhapi.svg" 
@@ -1251,30 +1483,46 @@ export default function DriverApp({
               <span className="hidden min-[380px]:inline">Offline</span>
             </div>
           )}
+          <ThemeSelector variant="compact-dark" />
+          <button
+            type="button"
+            onClick={handleCenterMyLocation}
+            className="h-8 sm:h-9 px-2 sm:px-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl shadow-md font-bold text-[11px] transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer border border-blue-400/50"
+            title="Minha Localidade: Levar mapa para a minha localização GPS atual"
+          >
+            <LocateFixed size={14} className={isRefreshingGps ? "animate-spin text-white" : "text-white"} />
+            <span className="hidden min-[360px]:inline">Minha Localidade</span>
+          </button>
+          <div 
+            className="hidden xl:flex items-center gap-1.5 px-2 py-1 bg-slate-900 border border-slate-700/80 rounded-xl text-[10px] text-emerald-400 font-bold"
+            title={`Atualização do GPS automática a cada 1 minuto (Última: ${lastGpsSyncTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span>GPS: 1 min</span>
+          </div>
+          <button
+            onClick={() => {
+              setHomeSitioInput(currentDriver?.homeSitio || assignedTruck?.driverHomeSitio || '');
+              setShowDriverSitioModal(true);
+            }}
+            className="h-8 sm:h-9 px-2 sm:px-2.5 bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-500/40 rounded-xl shadow-sm font-bold text-[11px] transition-all active:scale-95 flex items-center gap-1 cursor-pointer"
+            title="Cadastrar ou atualizar localização do meu sítio via GPS"
+          >
+            <Home size={13} className="text-emerald-400 shrink-0" />
+            <span className="hidden min-[400px]:inline">Meu Sítio</span>
+          </button>
           <button
             onClick={() => forceUpdateGPS(true)}
             disabled={isRefreshingGps}
-            className="h-9 px-2.5 bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded-xl shadow-sm font-semibold text-[11px] transition-all active:scale-95 flex items-center gap-1 border border-slate-700/70 cursor-pointer"
+            className="h-8 sm:h-9 px-2 sm:px-2.5 bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded-xl shadow-sm font-semibold text-[11px] transition-all active:scale-95 flex items-center gap-1 border border-slate-700/70 cursor-pointer"
             title="Atualizar GPS agora"
           >
             <RefreshCw size={13} className={isRefreshingGps ? 'animate-spin text-cyan-300' : ''} />
             <span className="hidden min-[360px]:inline">GPS</span>
           </button>
           <button 
-            onClick={() => {
-              localStorage.removeItem('pipa_selected_truck_id');
-              setSelectedTruckId(null);
-              setAssignedTruck(null);
-            }} 
-            className="h-9 px-2.5 sm:px-3 bg-slate-900 hover:bg-slate-800 text-slate-200 rounded-xl shadow-sm font-semibold text-[11px] sm:text-xs transition-all active:scale-95 flex items-center gap-1 border border-slate-700/70 cursor-pointer"
-            title="Trocar Operador / Motorista"
-          >
-            <User size={14} className="text-cyan-400 shrink-0" />
-            <span>Trocar</span>
-          </button>
-          <button 
             onClick={() => auth.signOut()} 
-            className="w-9 h-9 bg-slate-900 text-red-400 hover:text-red-300 hover:bg-red-950/40 border border-slate-700/70 rounded-xl shadow-sm transition-all active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
+            className="w-8 h-8 sm:w-9 sm:h-9 bg-slate-900 text-red-400 hover:text-red-300 hover:bg-red-950/40 border border-slate-700/70 rounded-xl shadow-sm transition-all active:scale-95 flex items-center justify-center cursor-pointer shrink-0"
             title="Sair da Conta"
           >
             <LogOut size={15} />
@@ -1286,12 +1534,15 @@ export default function DriverApp({
       <div className="flex-1 relative z-0 isolate min-h-[240px]">
         <MapContainer 
           trucks={assignedTruck ? [assignedTruck] : []} 
-          deliveries={myDeliveries.filter(d => d.status !== 'DELIVERED')} 
+          deliveries={myDeliveries} 
           sitios={sitios}
+          drivers={drivers}
+          residents={residents}
           route={plannedRoute}
           selectedTruckId={assignedTruck?.id}
           newPoint={showAddSitio && location ? [location.lat, location.lng] : null}
           isDriver={true}
+          flyToCoords={driverFlyTarget}
         />
         
         {/* Floating Quick Action Button */}
@@ -1586,10 +1837,11 @@ export default function DriverApp({
                     setDeliveryToComplete(null);
                     setPhotoBase64(null);
                   }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={16} />
                 </button>
               </div>
               <p className="text-slate-400 text-xs mb-4">Tire uma foto do local ou do morador para confirmar.</p>
@@ -1725,6 +1977,137 @@ export default function DriverApp({
         )}
       </AnimatePresence>
 
+      {/* Modal: Meu Sítio (Local de Residência via GPS do Celular) */}
+      <AnimatePresence>
+        {showDriverSitioModal && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[2200] flex items-center justify-center p-3.5 sm:p-6 overflow-y-auto">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }} 
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-brand-dark border border-white/10 p-4 sm:p-6 rounded-2xl sm:rounded-[32px] w-full max-w-md shadow-2xl max-h-[92dvh] overflow-y-auto my-auto"
+            >
+              <div className="flex justify-between items-center mb-3 sm:mb-4">
+                <h3 className="text-base sm:text-lg font-black uppercase tracking-tight flex items-center gap-2 text-white">
+                  <span className="text-xl">🏡</span> Meu Sítio (Residência)
+                </h3>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setShowDriverSitioModal(false)}
+                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                    title="Voltar"
+                    aria-label="Voltar"
+                  >
+                    <ArrowLeft size={16} />
+                  </button>
+                  <button onClick={() => setShowDriverSitioModal(false)} className="text-white/50 hover:text-white p-1 rounded-lg">
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Explicação */}
+              <p className="text-xs text-white/70 mb-4 leading-relaxed">
+                Informe o nome do <strong className="text-white">Sítio onde você mora</strong> e capture o GPS do seu celular. Sua casa será marcada no mapa para que o secretário saiba sua localização exata e despache entregas mais próximas de você!
+              </p>
+
+              {/* Status Atual Salvo */}
+              <div className="bg-emerald-950/40 border border-emerald-500/30 p-3.5 rounded-2xl mb-4 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400">
+                    Status Atual da Residência
+                  </span>
+                  <span className={`w-2 h-2 rounded-full ${currentDriver?.homeLat ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`} />
+                </div>
+                {currentDriver?.homeLat && currentDriver?.homeLng ? (
+                  <div className="text-xs text-white">
+                    <p className="font-bold">
+                      📍 Sítio: <span className="text-emerald-300 font-black">{currentDriver.homeSitio || assignedTruck?.driverHomeSitio || 'Cadastrado'}</span>
+                    </p>
+                    <p className="font-mono text-[11px] text-white/60 mt-0.5">
+                      GPS: {currentDriver.homeLat.toFixed(5)}, {currentDriver.homeLng.toFixed(5)}
+                      {currentDriver.homeGpsAccuracy ? ` (±${currentDriver.homeGpsAccuracy.toFixed(0)}m)` : ''}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-300/90 font-medium">
+                    ⚠️ Você ainda não salvou a localização GPS do seu sítio.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-4">
+                {/* Nome do Sítio */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-white/50 block ml-1 uppercase tracking-widest">
+                    Nome do seu Sítio / Comunidade *
+                  </label>
+                  <input 
+                    type="text"
+                    autoFocus
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:border-brand-primary outline-none transition-all placeholder:text-white/20"
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão..."
+                    value={homeSitioInput}
+                    onChange={e => setHomeSitioInput(e.target.value)}
+                  />
+                </div>
+
+                {/* Coordenadas Atuais do Celular */}
+                <div className="bg-white/5 p-3.5 rounded-2xl border border-white/5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-bold text-white/40 uppercase mb-0.5 tracking-wider">
+                      GPS Atual do seu Celular
+                    </p>
+                    <p className="font-mono text-xs text-emerald-400 truncate">
+                      {location ? `${location.lat.toFixed(6)}, ${location.lng.toFixed(6)}` : 'Detectando sinal GPS...'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => forceUpdateGPS(true)}
+                    disabled={isRefreshingGps}
+                    className="bg-white/10 hover:bg-white/20 active:scale-95 text-white/90 hover:text-white px-3 py-1.5 rounded-lg border border-white/10 flex items-center gap-1.5 text-[10px] uppercase font-bold tracking-wider transition-all cursor-pointer shrink-0"
+                  >
+                    <RefreshCw size={11} className={isRefreshingGps ? 'animate-spin' : ''} />
+                    <span>Atualizar</span>
+                  </button>
+                </div>
+
+                <div className="bg-sky-500/10 border border-sky-500/20 p-3 rounded-xl text-[11px] text-sky-200 leading-normal flex items-start gap-2">
+                  <span className="text-base shrink-0">💡</span>
+                  <span>
+                    Dica: Abra este botão quando estiver em sua casa/sítio e clique abaixo para gravar o ponto exato da sua residência.
+                  </span>
+                </div>
+              </div>
+
+              {/* Botão de Salvar */}
+              <div className="flex gap-2.5 mt-6">
+                <button
+                  type="button"
+                  onClick={() => setShowDriverSitioModal(false)}
+                  className="flex-1 py-3 bg-white/10 hover:bg-white/15 text-white rounded-xl text-xs font-bold uppercase transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingHomeSitio || !homeSitioInput.trim()}
+                  onClick={handleSaveDriverHomeSitio}
+                  className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:grayscale text-emerald-950 font-black uppercase text-xs tracking-wider rounded-xl transition-all shadow-xl shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isSavingHomeSitio ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <span>📡 Salvar Meu Sítio via GPS</span>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {showAddSitio && (
           <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[2200] flex items-center justify-center p-3.5 sm:p-6 overflow-y-auto">
@@ -1741,10 +2124,11 @@ export default function DriverApp({
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={resetSitioModal}
-                    className="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                    title="Voltar"
+                    aria-label="Voltar"
                   >
-                    <ArrowLeft size={13} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={16} />
                   </button>
                   <button onClick={resetSitioModal} className="text-white/50 hover:text-white p-1 rounded-lg">
                     <X size={20} />

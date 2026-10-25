@@ -638,10 +638,11 @@ export default function CouncilmanPerformanceSection({
                 <button
                   type="button"
                   onClick={() => setSelectedCouncilmanDetail(null)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
                 <button
                   type="button"

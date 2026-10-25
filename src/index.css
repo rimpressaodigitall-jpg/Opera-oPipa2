@@ -108,3 +108,107 @@ html, body, #root {
     box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
   }
 }
+
+/* ==========================================================================
+   TEMAS PERSONALIZADOS DO SISTEMA (O tema padrão permanece inalterado)
+   1. alegre: Cores mais alegres, solares e vibrantes (Turquesa, Coral, Sol)
+   2. classico: Mais clássico e institucional (Azul-Marinho Real, Marfim, Ouro)
+   3. profissional: Mais chamativo e profissional (Executivo Índigo Elétrico & Ciano)
+   ========================================================================== */
+
+/* TEMA 1: ALEGRE & VIBRANTE */
+html[data-theme="alegre"] {
+  --color-brand-dark: #064e3b;
+  --color-brand-primary: #0284c7;
+  --color-brand-light: #38bdf8;
+  --color-brand-teal: #0d9488;
+
+  /* Superfícies claras ganham tom solar/água-marinha alegre */
+  --color-slate-50: #f0fdfa;
+  --color-slate-100: #ccfbf1;
+  --color-slate-200: #99f6e4;
+  --color-slate-300: #5eead4;
+  --color-slate-400: #0d9488;
+  --color-slate-500: #0f766e;
+  --color-slate-600: #115e59;
+  --color-slate-700: #134e4a;
+  --color-slate-800: #0f5257;
+  --color-slate-900: #064e3b;
+  --color-slate-950: #042f2e;
+
+  /* Azuis primários vibrantes e solares */
+  --color-blue-50: #fffbeb;
+  --color-blue-100: #fef3c7;
+  --color-blue-200: #fde68a;
+  --color-blue-400: #fbbf24;
+  --color-blue-500: #f59e0b;
+  --color-blue-600: #0284c7;
+  --color-blue-700: #0369a1;
+}
+
+/* TEMA 2: CLÁSSICO INSTITUCIONAL */
+html[data-theme="classico"] {
+  --color-brand-dark: #172554;
+  --color-brand-primary: #1e3a8a;
+  --color-brand-light: #d97706;
+  --color-brand-teal: #b45309;
+
+  /* Superfícies em tom marfim / pergaminho clássico e azul-marinho imperial */
+  --color-slate-50: #faf7f2;
+  --color-slate-100: #f3ede2;
+  --color-slate-200: #e4dac8;
+  --color-slate-300: #d1c3ac;
+  --color-slate-400: #8c7a60;
+  --color-slate-500: #6b5b45;
+  --color-slate-600: #4e4130;
+  --color-slate-700: #362d21;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #172554;
+  --color-slate-950: #0b1536;
+
+  /* Destaques em azul imperial e ouro clássico */
+  --color-blue-50: #fef9c3;
+  --color-blue-100: #fef08a;
+  --color-blue-200: #fde047;
+  --color-blue-400: #f59e0b;
+  --color-blue-500: #d97706;
+  --color-blue-600: #1e3a8a;
+  --color-blue-700: #172554;
+
+  --color-cyan-400: #fbbf24;
+  --color-cyan-500: #d97706;
+}
+
+/* TEMA 3: CHAMATIVO & PROFISSIONAL (EXECUTIVO DE ALTO IMPACTO) */
+html[data-theme="profissional"] {
+  --color-brand-dark: #1e1b4b;
+  --color-brand-primary: #4f46e5;
+  --color-brand-light: #06b6d4;
+  --color-brand-teal: #4338ca;
+
+  /* Superfícies executivas em platina/índigo e carbono profundo */
+  --color-slate-50: #eef2ff;
+  --color-slate-100: #e0e7ff;
+  --color-slate-200: #c7d2fe;
+  --color-slate-300: #a5b4fc;
+  --color-slate-400: #6366f1;
+  --color-slate-500: #4f46e5;
+  --color-slate-600: #3730a3;
+  --color-slate-700: #312e81;
+  --color-slate-800: #1e1b4b;
+  --color-slate-900: #0f0d26;
+  --color-slate-950: #060513;
+
+  /* Destaques em índigo elétrico e violeta corporativo */
+  --color-blue-50: #eef2ff;
+  --color-blue-100: #e0e7ff;
+  --color-blue-200: #c7d2fe;
+  --color-blue-400: #818cf8;
+  --color-blue-500: #6366f1;
+  --color-blue-600: #4f46e5;
+  --color-blue-700: #4338ca;
+
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+}
+

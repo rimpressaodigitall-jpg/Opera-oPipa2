@@ -117,6 +117,35 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["password"]
+    },
+    "FuelLog": {
+      "title": "FuelLog",
+      "description": "Registro de abastecimento dos caminhões-pipa para cálculo de consumo médio por km por setor.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "truckId": { "type": "string" },
+        "plate": { "type": "string" },
+        "driverName": { "type": "string" },
+        "sector": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "liters": { "type": "number" },
+        "pricePerLiter": { "type": "number" },
+        "totalCost": { "type": "number" },
+        "fuelType": { "type": "string", "enum": ["DIESEL_S10", "DIESEL_COMUM", "GASOLINA", "ARLA_32"] },
+        "currentKm": { "type": "number" },
+        "previousKm": { "type": "number" },
+        "distanceKm": { "type": "number" },
+        "kmPerLiter": { "type": "number" },
+        "litersPerKm": { "type": "number" },
+        "costPerKm": { "type": "number" },
+        "gasStation": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "photoReceipt": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["truckId", "plate", "sector", "liters", "currentKm"]
     }
   },
   "firestore": {
@@ -155,6 +184,10 @@
     "/push_subscriptions/{subId}": {
       "schema": "PushSubscriptionRecord",
       "description": "Collection of Web Push subscriptions."
+    },
+    "/fuel_logs/{logId}": {
+      "schema": "FuelLog",
+      "description": "Collection of truck fueling records and fuel consumption per sector."
     }
   }
 }

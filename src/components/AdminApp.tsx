@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
@@ -34,11 +34,14 @@ import {
   DeliveryStatus, 
   TruckStatus,
   AdminConfig,
-  Driver
+  Driver,
+  FuelLog,
+  FuelLogType
 } from '../types';
 import MapContainer from './MapContainer';
 import CouncilmanPerformanceSection from './CouncilmanPerformanceSection';
-import { fetchRoadRoute, WATER_SUPPLY_POINT, isRoadRoute } from '../lib/routing';
+import ThemeSelector from './ThemeSelector';
+import { fetchRoadRoute, WATER_SUPPLY_POINT, isRoadRoute, getHaversineDistanceKm } from '../lib/routing';
 import { 
   Truck as TruckIcon, 
   Droplet, 
@@ -47,6 +50,8 @@ import {
   ClipboardList,
   Clock,
   LayoutDashboard,
+  Compass,
+  Map as MapIcon,
   LogOut,
   Users,
   UserCheck,
@@ -69,6 +74,7 @@ import {
   ExternalLink,
   Volume2,
   VolumeX,
+  Bell,
   BellRing,
   Download,
   ShieldCheck,
@@ -82,7 +88,17 @@ import {
   LocateFixed,
   Search,
   ArrowLeft,
-  Lock
+  Lock,
+  Filter,
+  Layers,
+  ChevronDown,
+  ChevronUp,
+  Fuel,
+  Gauge,
+  TrendingUp,
+  DollarSign,
+  Calendar,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { playDeliveryCompletedChime, playTestChime } from '../lib/audioNotification';
@@ -110,7 +126,13 @@ function getDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number) {
   return R * c;
 }
 
-export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => void } = {}) {
+export default function AdminApp({ 
+  onTrocarAcesso, 
+  userRole = 'secretary' 
+}: { 
+  onTrocarAcesso?: () => void; 
+  userRole?: 'admin' | 'secretary';
+} = {}) {
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [sitios, setSitios] = useState<Sitio[]>([]);
@@ -118,7 +140,41 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [councilmen, setCouncilmen] = useState<Councilman[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'map' | 'deliveries' | 'sitios' | 'residents' | 'settings' | 'sync'>('map');
+  const [activeTab, setActiveTab] = useState<'operational' | 'map' | 'deliveries' | 'fuel' | 'sitios' | 'residents' | 'settings' | 'sync' | 'trucks'>('operational');
+
+  // Fuel Logs & Consumption by Sector State
+  const [fuelLogs, setFuelLogs] = useState<FuelLog[]>([]);
+  const [showAddFuelModal, setShowAddFuelModal] = useState(false);
+  const [editingFuelLog, setEditingFuelLog] = useState<FuelLog | null>(null);
+  const [fuelSectorFilter, setFuelSectorFilter] = useState<string>('ALL');
+  const [fuelTruckFilter, setFuelTruckFilter] = useState<string>('ALL');
+  const [fuelPeriodFilter, setFuelPeriodFilter] = useState<'ALL' | 'TODAY' | 'WEEK' | 'MONTH'>('ALL');
+  const [fuelSearch, setFuelSearch] = useState<string>('');
+  const [fuelFormError, setFuelFormError] = useState<string>('');
+  const [isSavingFuelLog, setIsSavingFuelLog] = useState(false);
+  const [fuelDeleteConfirm, setFuelDeleteConfirm] = useState<FuelLog | null>(null);
+
+  // Form data for Fuel Log Modal
+  const [fuelFormData, setFuelFormData] = useState({
+    truckId: '',
+    plate: '',
+    driverName: '',
+    sector: '',
+    date: new Date().toISOString().slice(0, 16),
+    liters: '' as string | number,
+    pricePerLiter: '' as string | number,
+    totalCost: '' as string | number,
+    fuelType: 'DIESEL_S10' as FuelLogType,
+    currentKm: '' as string | number,
+    previousKm: '' as string | number,
+    gasStation: 'Posto Central Inhapi',
+    invoiceNumber: '',
+    photoReceipt: '',
+    notes: ''
+  });
+  const [operationalStatusFilter, setOperationalStatusFilter] = useState<'ALL' | 'PENDING' | 'IN_ROUTE' | 'DELIVERED_TODAY'>('ALL');
+  const [operationalSearch, setOperationalSearch] = useState('');
+  const [operationalSectorFilter, setOperationalSectorFilter] = useState('');
   const [deviceSyncStatuses, setDeviceSyncStatuses] = useState<any[]>([]);
   const [activeCadastroSubTab, setActiveCadastroSubTab] = useState<'resident' | 'truck' | 'driver' | 'councilman'>('resident');
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
@@ -236,14 +292,70 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
     return inServiceModalFilter === 'in_service' ? activeInServiceDrivers : allRegisteredDrivers;
   }, [inServiceModalFilter, activeInServiceDrivers, allRegisteredDrivers]);
 
+  // Lista de setores/sítios únicos para filtragem rápida no Monitoramento Operacional
+  const operationalSectors = useMemo(() => {
+    const s = new Set<string>();
+    deliveries.forEach(d => {
+      const sec = (d.sector || d.neighborhood || '').trim();
+      if (sec) s.add(sec);
+    });
+    residents.forEach(r => {
+      const sec = (r.sector || r.neighborhood || '').trim();
+      if (sec) s.add(sec);
+    });
+    return Array.from(s).sort();
+  }, [deliveries, residents]);
+
+  // Pedidos de água filtrados para exibição no Monitoramento Operacional
+  const filteredOperationalDeliveries = useMemo(() => {
+    return deliveries.filter(d => {
+      // Filtro de Status
+      if (operationalStatusFilter === 'PENDING' && d.status !== 'PENDING') return false;
+      if (operationalStatusFilter === 'IN_ROUTE' && d.status !== 'IN_ROUTE') return false;
+      if (operationalStatusFilter === 'DELIVERED_TODAY') {
+        if (d.status !== 'DELIVERED' || !d.createdAt) return false;
+        try {
+          const dDateStr = new Date(d.createdAt).toLocaleDateString('en-CA');
+          if (dDateStr !== todayStr) return false;
+        } catch {
+          if (!d.createdAt.startsWith(todayStr)) return false;
+        }
+      }
+
+      // Filtro de Setor / Sítio
+      if (operationalSectorFilter) {
+        const sec = (d.sector || d.neighborhood || '').toLowerCase();
+        if (!sec.includes(operationalSectorFilter.toLowerCase())) return false;
+      }
+
+      // Busca por texto livre (morador, endereço, sítio, vereador, motorista, placa)
+      if (operationalSearch.trim()) {
+        const q = operationalSearch.toLowerCase().trim();
+        const resMatch = (d.residentName || '').toLowerCase().includes(q);
+        const addrMatch = (d.address || '').toLowerCase().includes(q);
+        const neighMatch = (d.neighborhood || '').toLowerCase().includes(q);
+        const refMatch = (d.referencePoint || '').toLowerCase().includes(q);
+        const councilMatch = (d.councilman || '').toLowerCase().includes(q);
+        const truckMatch = trucks.some(t => t.id === d.truckId && (
+          (t.driverName || '').toLowerCase().includes(q) || 
+          (t.plate || '').toLowerCase().includes(q)
+        ));
+        return resMatch || addrMatch || neighMatch || refMatch || councilMatch || truckMatch;
+      }
+
+      return true;
+    });
+  }, [deliveries, operationalStatusFilter, operationalSectorFilter, operationalSearch, todayStr, trucks]);
+
   // New Item states
-  const [newTruck, setNewTruck] = useState({ plate: '', driverName: '' });
+  const [newTruck, setNewTruck] = useState({ plate: '', driverName: '', sector: '' });
   const [newDelivery, setNewDelivery] = useState<{ 
     truckId: string; 
     residentId?: string;
     residentName: string; 
     address: string; 
     neighborhood?: string;
+    sector?: string;
     referencePoint: string; 
     phone?: string;
     councilman: string; 
@@ -255,6 +367,7 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
     residentName: '', 
     address: '', 
     neighborhood: '',
+    sector: '',
     referencePoint: '', 
     phone: '',
     councilman: '', 
@@ -271,17 +384,385 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
     type: 'RESIDENT' as 'RESIDENT' | 'SCHOOL' | 'DAYCARE' | 'WATER' | 'FUEL' | 'OTHER',
     fuelType: 'NONE' as 'DIESEL' | 'GASOLINE' | 'NONE'
   });
-  const [newResident, setNewResident] = useState({ 
+  const [newResident, setNewResident] = useState<{
+    name: string;
+    address: string;
+    neighborhood: string;
+    phone: string;
+    referencePoint: string;
+    councilman: string;
+    category: 'RESIDENT' | 'SCHOOL' | 'DAYCARE';
+    preferredDriver?: string;
+    sector?: string;
+  }>({ 
     name: '', 
     address: '', 
     neighborhood: '', 
     phone: '', 
     referencePoint: '',
-    councilman: ''
+    councilman: '',
+    category: 'RESIDENT',
+    preferredDriver: '',
+    sector: ''
   });
+  const [residentCategoryFilter, setResidentCategoryFilter] = useState<'ALL' | 'RESIDENT' | 'SCHOOL' | 'DAYCARE'>('ALL');
+  const [residentFormError, setResidentFormError] = useState('');
+  const [isSavingResident, setIsSavingResident] = useState(false);
+  const [showNameAutocomplete, setShowNameAutocomplete] = useState(false);
+  const [duplicateWarningAcknowledged, setDuplicateWarningAcknowledged] = useState(false);
+
+  // Deliveries Grouping & Sector Filters
+  const [deliveryViewMode, setDeliveryViewMode] = useState<'ALL' | 'BY_SECTOR' | 'BY_DRIVER'>('BY_SECTOR');
+  const [selectedDeliverySectorFilter, setSelectedDeliverySectorFilter] = useState<string>('ALL');
+  const [selectedDeliveryDriverFilter, setSelectedDeliveryDriverFilter] = useState<string>('ALL');
+  const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<'ALL' | 'PENDING' | 'IN_ROUTE' | 'DELIVERED'>('ALL');
+  const [deliverySearchQuery, setDeliverySearchQuery] = useState<string>('');
+  const [expandedSectors, setExpandedSectors] = useState<Record<string, boolean>>({});
+  const [expandedDrivers, setExpandedDrivers] = useState<Record<string, boolean>>({});
+
+  // Helper inteligente para mapear o setor e o motorista indicado/notificado de cada morador
+  const getResidentSectorAndDriver = useCallback((resident: Resident) => {
+    // 1. Extração do setor do morador
+    const rawSector = (resident.sector || resident.neighborhood || '').trim();
+    const sectorName = rawSector || (resident.address ? resident.address.split('-')[0].trim() : 'Inhapi (Centro)');
+    const cleanSector = sectorName.toLowerCase();
+    const cleanAddress = (resident.address || '').toLowerCase();
+
+    // 2. Cálculo de Proximidade por GPS do Sítio do Motorista
+    let closestDriverByGps: {
+      driver: Driver;
+      truck?: Truck;
+      distanceKm: number;
+    } | null = null;
+
+    if (resident.lat && resident.lng) {
+      const driversWithGps = drivers
+        .filter(d => d.homeLat && d.homeLng)
+        .map(d => {
+          const dist = getHaversineDistanceKm(resident.lat!, resident.lng!, d.homeLat!, d.homeLng!);
+          const trk = trucks.find(t => t.driverName.toLowerCase() === d.name.toLowerCase());
+          return {
+            driver: d,
+            truck: trk,
+            distanceKm: dist
+          };
+        })
+        .sort((a, b) => a.distanceKm - b.distanceKm);
+
+      if (driversWithGps.length > 0) {
+        closestDriverByGps = driversWithGps[0];
+      }
+    }
+
+    // 3. Se o morador tem motorista preferencial definido explicitamente
+    if (resident.preferredDriver) {
+      const directTruck = trucks.find(t => 
+        t.driverName.toLowerCase() === resident.preferredDriver?.toLowerCase() ||
+        t.id === resident.preferredDriver
+      );
+      const directDriver = drivers.find(d => 
+        d.name.toLowerCase() === resident.preferredDriver?.toLowerCase() ||
+        d.id === resident.preferredDriver
+      );
+      if (directTruck || directDriver) {
+        return {
+          truckId: directTruck?.id || '',
+          driverName: directTruck?.driverName || directDriver?.name || resident.preferredDriver,
+          plate: directTruck?.plate || '',
+          driverPhone: directDriver?.phone || '',
+          sectorName,
+          reason: 'assigned' as const,
+          reasonText: 'Motorista vinculado diretamente no cadastro do morador',
+          closestDriverByGps
+        };
+      }
+    }
+
+    // 3. Cruzamento por Setor/Endereço configurado no Caminhão ou no Motorista
+    if (cleanSector || cleanAddress) {
+      // Verificar se algum caminhão tem este setor atribuído
+      const truckWithSector = trucks.find(t => {
+        const tSector = (t.sector || '').toLowerCase();
+        return tSector && (
+          (cleanSector && (tSector.includes(cleanSector) || cleanSector.includes(tSector))) ||
+          (cleanAddress && (tSector.includes(cleanAddress) || cleanAddress.includes(tSector)))
+        );
+      });
+      if (truckWithSector) {
+        const drv = drivers.find(d => d.name.toLowerCase() === truckWithSector.driverName.toLowerCase());
+        return {
+          truckId: truckWithSector.id,
+          driverName: truckWithSector.driverName,
+          plate: truckWithSector.plate,
+          driverPhone: drv?.phone || '',
+          sectorName,
+          reason: 'sector' as const,
+          reasonText: `Caminhão (${truckWithSector.plate}) alocado no setor "${sectorName}"`,
+          closestDriverByGps
+        };
+      }
+
+      // Verificar se algum motorista tem este setor ou endereço cadastrado
+      const driverWithSector = drivers.find(d => {
+        const dSector = (d.sector || '').toLowerCase();
+        const dAddr = (d.address || '').toLowerCase();
+        return (
+          (dSector && cleanSector && (dSector.includes(cleanSector) || cleanSector.includes(dSector))) ||
+          (dAddr && cleanSector && (dAddr.includes(cleanSector) || cleanSector.includes(dAddr))) ||
+          (dSector && cleanAddress && (dSector.includes(cleanAddress) || cleanAddress.includes(dSector))) ||
+          (dAddr && cleanAddress && (dAddr.includes(cleanAddress) || cleanAddress.includes(dAddr)))
+        );
+      });
+      if (driverWithSector) {
+        const truckForDriver = trucks.find(t => t.driverName.toLowerCase() === driverWithSector.name.toLowerCase());
+        return {
+          truckId: truckForDriver?.id || '',
+          driverName: driverWithSector.name,
+          plate: truckForDriver?.plate || '',
+          driverPhone: driverWithSector.phone || '',
+          sectorName,
+          reason: 'sector' as const,
+          reasonText: `Motorista atende setor / base: "${driverWithSector.sector || driverWithSector.address || sectorName}"`,
+          closestDriverByGps
+        };
+      }
+    }
+
+    // 4. Aprendizado pelo histórico de entregas anteriores neste endereço ou morador
+    const relevantDeliveries = deliveries.filter(d => {
+      const matchResident = (d.residentId && d.residentId === resident.id) ||
+        (d.residentName && d.residentName.trim().toLowerCase() === resident.name.trim().toLowerCase());
+      const matchLoc = cleanSector && (
+        (d.neighborhood && d.neighborhood.toLowerCase().includes(cleanSector)) ||
+        (d.address && d.address.toLowerCase().includes(cleanSector))
+      );
+      return matchResident || matchLoc;
+    });
+
+    if (relevantDeliveries.length > 0) {
+      const counts: Record<string, number> = {};
+      for (const d of relevantDeliveries) {
+        if (d.truckId) {
+          counts[d.truckId] = (counts[d.truckId] || 0) + 1;
+        }
+      }
+      const sortedTruckIds = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+      if (sortedTruckIds.length > 0) {
+        const bestTruckId = sortedTruckIds[0];
+        const bestTruck = trucks.find(t => t.id === bestTruckId);
+        if (bestTruck) {
+          const drv = drivers.find(d => d.name.toLowerCase() === bestTruck.driverName.toLowerCase());
+          return {
+            truckId: bestTruck.id,
+            driverName: bestTruck.driverName,
+            plate: bestTruck.plate,
+            driverPhone: drv?.phone || '',
+            sectorName,
+            reason: 'history' as const,
+            historyCount: counts[bestTruckId],
+            reasonText: `Mais realizou entregas neste setor (${counts[bestTruckId]} ${counts[bestTruckId] === 1 ? 'abastecimento' : 'abastecimentos'})`,
+            closestDriverByGps
+          };
+        }
+      }
+    }
+
+    // 5. Se não houver vínculo específico, recomendar o motorista mais próximo por GPS
+    if (closestDriverByGps) {
+      return {
+        truckId: closestDriverByGps.truck?.id || '',
+        driverName: closestDriverByGps.driver.name,
+        plate: closestDriverByGps.truck?.plate || '',
+        driverPhone: closestDriverByGps.driver.phone || '',
+        sectorName,
+        reason: 'proximity' as any,
+        reasonText: `Mais próximo por GPS: Mora no ${closestDriverByGps.driver.homeSitio || 'Sítio'} a ${closestDriverByGps.distanceKm.toFixed(1)} km`,
+        closestDriverByGps
+      };
+    }
+
+    return {
+      truckId: '',
+      driverName: '',
+      plate: '',
+      driverPhone: '',
+      sectorName,
+      reason: 'none' as const,
+      reasonText: 'Nenhum motorista fixado para este setor',
+      closestDriverByGps: null
+    };
+  }, [trucks, drivers, deliveries]);
+
+  // Extrair setor canônico de uma entrega
+  const getDeliverySector = useCallback((delivery: Delivery) => {
+    return (delivery.sector || delivery.neighborhood || (delivery.address ? delivery.address.split('-')[0].trim() : '') || 'Inhapi (Centro)').trim();
+  }, []);
+
+  // Encontrar o motorista/caminhão responsável pelo setor
+  const getSectorResponsibleDriver = useCallback((sectorName: string) => {
+    const cleanSector = sectorName.toLowerCase().trim();
+    if (!cleanSector) return null;
+
+    // 1. Procurar em trucks por setor
+    const t = trucks.find(trk => (trk.sector || '').toLowerCase().includes(cleanSector));
+    if (t) {
+      const drv = drivers.find(d => d.name.toLowerCase() === t.driverName.toLowerCase());
+      return { driverName: t.driverName, plate: t.plate, phone: drv?.phone || '', address: drv?.address || '', truckId: t.id };
+    }
+
+    // 2. Procurar em drivers por setor ou endereço
+    const drv = drivers.find(d => {
+      const s = (d.sector || '').toLowerCase();
+      const a = (d.address || '').toLowerCase();
+      return (s && (s.includes(cleanSector) || cleanSector.includes(s))) ||
+             (a && (a.includes(cleanSector) || cleanSector.includes(a)));
+    });
+    if (drv) {
+      const trk = trucks.find(t => t.driverName.toLowerCase() === drv.name.toLowerCase());
+      return { driverName: drv.name, plate: trk?.plate || '', phone: drv.phone || '', address: drv.address || '', truckId: trk?.id || '' };
+    }
+
+    // 3. Procurar em moradores daquele setor se tem preferredDriver
+    const resWithDriver = residents.find(r => {
+      const rSec = (r.sector || r.neighborhood || '').toLowerCase();
+      return rSec && (rSec.includes(cleanSector) || cleanSector.includes(rSec)) && r.preferredDriver;
+    });
+    if (resWithDriver && resWithDriver.preferredDriver) {
+      const trk = trucks.find(t => t.driverName.toLowerCase() === resWithDriver.preferredDriver?.toLowerCase());
+      const drvObj = drivers.find(d => d.name.toLowerCase() === resWithDriver.preferredDriver?.toLowerCase());
+      return { driverName: resWithDriver.preferredDriver, plate: trk?.plate || '', phone: drvObj?.phone || '', address: drvObj?.address || '', truckId: trk?.id || '' };
+    }
+
+    return null;
+  }, [trucks, drivers, residents]);
+
+  // Lista unificada e ordenada de setores existentes no município
+  const sectorsList = useMemo(() => {
+    const set = new Set<string>();
+    residents.forEach(r => {
+      const s = (r.sector || r.neighborhood || '').trim();
+      if (s) set.add(s);
+    });
+    deliveries.forEach(d => {
+      const s = (d.sector || d.neighborhood || '').trim();
+      if (s) set.add(s);
+    });
+    trucks.forEach(t => {
+      if (t.sector) t.sector.split(',').forEach(x => { if (x.trim()) set.add(x.trim()); });
+    });
+    drivers.forEach(d => {
+      if (d.sector) d.sector.split(',').forEach(x => { if (x.trim()) set.add(x.trim()); });
+      if (d.address) d.address.split(',').forEach(x => { if (x.trim()) set.add(x.trim()); });
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [residents, deliveries, trucks, drivers]);
+
+  // Entregas filtradas conforme busca, setor, motorista e status
+  const filteredDeliveriesForView = useMemo(() => {
+    return deliveries.filter(d => {
+      // Filtro de status
+      if (deliveryStatusFilter !== 'ALL' && d.status !== deliveryStatusFilter) return false;
+
+      // Filtro de setor
+      const sec = getDeliverySector(d);
+      if (selectedDeliverySectorFilter !== 'ALL' && sec.toLowerCase() !== selectedDeliverySectorFilter.toLowerCase()) {
+        return false;
+      }
+
+      // Filtro de motorista / caminhão
+      if (selectedDeliveryDriverFilter !== 'ALL') {
+        const assignedTruck = trucks.find(t => t.id === d.truckId);
+        const isTruckMatch = d.truckId === selectedDeliveryDriverFilter;
+        const isDriverNameMatch = assignedTruck && assignedTruck.driverName.toLowerCase() === selectedDeliveryDriverFilter.toLowerCase();
+        if (!isTruckMatch && !isDriverNameMatch) return false;
+      }
+
+      // Busca textual
+      if (deliverySearchQuery.trim()) {
+        const q = deliverySearchQuery.toLowerCase().trim();
+        const residentMatch = (d.residentName || '').toLowerCase().includes(q);
+        const addressMatch = (d.address || '').toLowerCase().includes(q);
+        const sectorMatch = sec.toLowerCase().includes(q);
+        const assignedTruck = trucks.find(t => t.id === d.truckId);
+        const driverMatch = assignedTruck ? (assignedTruck.driverName || '').toLowerCase().includes(q) : false;
+        const councilmanMatch = (d.councilman || '').toLowerCase().includes(q);
+        return residentMatch || addressMatch || sectorMatch || driverMatch || councilmanMatch;
+      }
+
+      return true;
+    });
+  }, [deliveries, deliveryStatusFilter, selectedDeliverySectorFilter, selectedDeliveryDriverFilter, deliverySearchQuery, getDeliverySector, trucks]);
+
+  // Agrupamento de entregas por Setor / Região com motorista responsável indicado
+  const sectorGroupedDeliveries = useMemo(() => {
+    const groups: Record<string, { sectorName: string; deliveries: Delivery[]; responsibleDriver: ReturnType<typeof getSectorResponsibleDriver> }> = {};
+    
+    filteredDeliveriesForView.forEach(d => {
+      const sec = getDeliverySector(d);
+      if (!groups[sec]) {
+        groups[sec] = {
+          sectorName: sec,
+          deliveries: [],
+          responsibleDriver: getSectorResponsibleDriver(sec)
+        };
+      }
+      groups[sec].deliveries.push(d);
+    });
+
+    return Object.values(groups).sort((a, b) => a.sectorName.localeCompare(b.sectorName));
+  }, [filteredDeliveriesForView, getDeliverySector, getSectorResponsibleDriver]);
+
+  // Agrupamento de entregas por Motorista com base em seu caminhão, setor e endereço
+  const driverGroupedDeliveries = useMemo(() => {
+    const groups: Array<{
+      truck: Truck;
+      driver: Driver | null;
+      deliveries: Delivery[];
+    }> = [];
+
+    const handledTruckIds = new Set<string>();
+
+    trucks.forEach(t => {
+      handledTruckIds.add(t.id);
+      const drv = drivers.find(d => d.name.toLowerCase() === t.driverName.toLowerCase()) || null;
+      const dels = filteredDeliveriesForView.filter(d => d.truckId === t.id);
+      groups.push({
+        truck: t,
+        driver: drv,
+        deliveries: dels
+      });
+    });
+
+    const otherDeliveries = filteredDeliveriesForView.filter(d => !handledTruckIds.has(d.truckId));
+
+    return { groups, otherDeliveries };
+  }, [trucks, drivers, filteredDeliveriesForView]);
+
+  const residentNameSuggestions = useMemo(() => {
+    const q = newResident.name.trim().toLowerCase();
+    if (q.length < 2) return [];
+    return residents
+      .filter(r => (r.name || '').toLowerCase().includes(q))
+      .slice(0, 6);
+  }, [residents, newResident.name]);
+
+  const exactDuplicateResident = useMemo(() => {
+    const q = newResident.name.trim().toLowerCase();
+    if (!q) return null;
+    return residents.find(r => (r.name || '').trim().toLowerCase() === q) || null;
+  }, [residents, newResident.name]);
+
   const [isAddingCouncilmanInResident, setIsAddingCouncilmanInResident] = useState(false);
   const [inlineCouncilmanName, setInlineCouncilmanName] = useState('');
-  const [newDriver, setNewDriver] = useState({ name: '', phone: '' });
+  const [newDriver, setNewDriver] = useState({ 
+    name: '', 
+    phone: '', 
+    sector: '', 
+    address: '',
+    homeSitio: '',
+    homeLat: 0,
+    homeLng: 0
+  });
   const [newCouncilman, setNewCouncilman] = useState({ name: '' });
 
   // Settings State
@@ -468,6 +949,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       setDrivers(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Driver)));
     }, handleErr('drivers'));
 
+    const qFuelLogs = query(collection(db, 'fuel_logs'), orderBy('date', 'desc'));
+    const unsubFuelLogs = onSnapshot(qFuelLogs, (snap) => {
+      setFuelLogs(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as FuelLog)));
+    }, handleErr('fuel_logs'));
+
     const qDeviceSync = query(collection(db, 'device_sync_status'), orderBy('lastUpdate', 'desc'));
     const unsubDeviceSync = onSnapshot(qDeviceSync, (snap) => {
       setDeviceSyncStatuses(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
@@ -490,6 +976,7 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       unsubResidents();
       unsubCouncilmen();
       unsubDrivers();
+      unsubFuelLogs();
       unsubDeviceSync();
       unsubAdminConfig();
     };
@@ -497,19 +984,22 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
 
   const handleAddTruck = async () => {
     if (!newTruck.plate || !newTruck.driverName) return;
+    const payload = {
+      plate: newTruck.plate.trim(),
+      driverName: newTruck.driverName.trim(),
+      sector: newTruck.sector ? newTruck.sector.trim() : '',
+      status: 'IDLE' as TruckStatus,
+      lastUpdate: new Date().toISOString()
+    };
     try {
-      await addDoc(collection(db, 'trucks'), {
-        ...newTruck,
-        status: 'IDLE' as TruckStatus,
-        lastUpdate: new Date().toISOString()
-      });
+      await addDoc(collection(db, 'trucks'), payload);
       setAdminToast({ show: true, message: 'Caminhão cadastrado com sucesso no Firebase!' });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
     } catch (err: any) {
       console.error("Firestore save failed:", err);
       // Fallback local memory state to let them continue
       const tempId = 'temp-truck-' + Date.now();
-      const tObj: Truck = { id: tempId, plate: newTruck.plate, driverName: newTruck.driverName, status: 'IDLE', lastUpdate: new Date().toISOString() };
+      const tObj: Truck = { id: tempId, ...payload };
       setTrucks(prev => [...prev, tObj]);
       setAdminToast({ show: true, message: 'Salvo localmente (Operando em Contingência)' });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 4000);
@@ -517,7 +1007,7 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
         window.dispatchEvent(new CustomEvent('firebase-quota-exceeded'));
       }
     } finally {
-      setNewTruck({ plate: '', driverName: '' });
+      setNewTruck({ plate: '', driverName: '', sector: '' });
       setShowAddTruck(false);
     }
   };
@@ -683,6 +1173,12 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
 
     setSelectedResidentObj(resident);
 
+    // Mapear setor e identificar o motorista responsável/recomendado
+    const sectorMatch = getResidentSectorAndDriver(resident);
+    const matchedTruck = sectorMatch.truckId ? trucks.find(t => t.id === sectorMatch.truckId) : null;
+    const fallbackTruck = trucks.find(t => t.status === 'IDLE') || trucks[0];
+    const targetTruckId = matchedTruck ? matchedTruck.id : (newDelivery.truckId || fallbackTruck?.id || '');
+
     // Buscar histórico de entregas anteriores deste morador para obter dados complementares (ex: coordenadas verificadas ou indicação habitual)
     const prevDeliveries = deliveries.filter(d => 
       (d.residentId && d.residentId === resident.id) || 
@@ -710,10 +1206,12 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
 
     setNewDelivery(prev => ({
       ...prev,
+      truckId: targetTruckId,
       residentId: resident.id,
       residentName: resident.name,
       address: fullAddress,
       neighborhood: resident.neighborhood || '',
+      sector: sectorMatch.sectorName,
       referencePoint: resident.referencePoint || '',
       phone: resident.phone || '',
       councilman: chosenCouncilman || prev.councilman,
@@ -724,12 +1222,9 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
 
   const handleQuickDispatchForResident = (resident: Resident) => {
     handleSelectResident(resident);
-    // Auto-selecionar o primeiro caminhão disponível caso nenhum esteja selecionado
-    if (!newDelivery.truckId) {
-      const availableTruck = trucks.find(t => t.status === 'IDLE') || trucks[0];
-      if (availableTruck) {
-        setNewDelivery(prev => ({ ...prev, truckId: availableTruck.id }));
-      }
+    const sectorMatch = getResidentSectorAndDriver(resident);
+    if (sectorMatch.truckId) {
+      setNewDelivery(prev => ({ ...prev, truckId: sectorMatch.truckId }));
     }
     setShowAddDelivery(true);
   };
@@ -741,10 +1236,15 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       return;
     }
 
+    const selectedTruckObj = trucks.find(t => t.id === newDelivery.truckId);
+    const finalSector = (newDelivery.sector || newDelivery.neighborhood || (selectedResidentObj?.neighborhood) || 'Inhapi').trim();
+
     const payload: any = {
       truckId: newDelivery.truckId,
       residentName: newDelivery.residentName,
       address: newDelivery.address,
+      neighborhood: newDelivery.neighborhood || finalSector,
+      sector: finalSector,
       referencePoint: newDelivery.referencePoint || '',
       councilman: newDelivery.councilman || '',
       lat: Number(newDelivery.lat) || -9.2201,
@@ -753,7 +1253,6 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       createdAt: new Date().toISOString()
     };
     if (newDelivery.residentId) payload.residentId = newDelivery.residentId;
-    if (newDelivery.neighborhood) payload.neighborhood = newDelivery.neighborhood;
     if (newDelivery.phone) payload.phone = newDelivery.phone;
 
     try {
@@ -762,22 +1261,27 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       // Sincronizar e manter dados atualizados no cadastro do morador no banco
       if (newDelivery.residentId) {
         try {
-          await updateDoc(doc(db, 'residents', newDelivery.residentId), {
+          const updatePayload: any = {
             referencePoint: newDelivery.referencePoint || '',
             phone: newDelivery.phone || '',
             lat: Number(newDelivery.lat) || -9.2201,
             lng: Number(newDelivery.lng) || -36.3503,
-            lastDeliveryAt: new Date().toISOString()
-          });
+            lastDeliveryAt: new Date().toISOString(),
+            sector: finalSector
+          };
+          if (selectedTruckObj) {
+            updatePayload.preferredDriver = selectedTruckObj.driverName;
+          }
+          await updateDoc(doc(db, 'residents', newDelivery.residentId), updatePayload);
         } catch (e) {
           console.warn("Could not sync to resident document:", e);
         }
       }
       
-      const truck = trucks.find(t => t.id === newDelivery.truckId);
+      const truck = selectedTruckObj;
       setAdminToast({ 
         show: true, 
-        message: `Entrega despachada para ${newDelivery.residentName}! ${truck ? truck.driverName : 'O motorista'} foi notificado.` 
+        message: `Entrega despachada para ${newDelivery.residentName}! Motorista ${truck ? truck.driverName : 'responsável'} (${finalSector}) notificado.` 
       });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 4000);
     } catch (err: any) {
@@ -809,12 +1313,22 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
   };
 
   const handleAddSitio = async () => {
-    if (!newSitio.name || !newSitio.lat || !newSitio.lng) return;
+    const trimmedName = newSitio.name.trim();
+    if (!trimmedName) {
+      const typeLabel = newSitio.type === 'SCHOOL' ? 'da escola' : newSitio.type === 'DAYCARE' ? 'da creche' : newSitio.type === 'RESIDENT' ? 'do morador' : 'do local';
+      setAdminToast({ show: true, message: `Por favor, informe o nome ${typeLabel}!` });
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+      return;
+    }
+
+    const finalLat = Number(newSitio.lat) || -9.2201;
+    const finalLng = Number(newSitio.lng) || -36.3503;
     
     const payload = {
       ...newSitio,
-      lat: Number(newSitio.lat),
-      lng: Number(newSitio.lng),
+      name: trimmedName,
+      lat: finalLat,
+      lng: finalLng,
       fuelType: newSitio.type === 'FUEL' ? newSitio.fuelType : 'NONE'
     };
 
@@ -824,6 +1338,27 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
         setAdminToast({ show: true, message: 'Ponto atualizado com sucesso no Firebase!' });
       } else {
         await addDoc(collection(db, 'sitios'), payload);
+
+        // Se for Morador, Escola ou Creche, cadastra também em residents para disponibilizar para entregas
+        if (newSitio.type === 'RESIDENT' || newSitio.type === 'SCHOOL' || newSitio.type === 'DAYCARE') {
+          try {
+            await addDoc(collection(db, 'residents'), {
+              name: trimmedName,
+              address: newSitio.description || trimmedName,
+              neighborhood: newSitio.description || 'Inhapi',
+              phone: '',
+              referencePoint: newSitio.description || '',
+              councilman: '',
+              category: newSitio.type,
+              lat: finalLat,
+              lng: finalLng,
+              createdAt: new Date().toISOString()
+            });
+          } catch (resErr) {
+            console.warn("Could not sync sitio to residents collection:", resErr);
+          }
+        }
+
         setAdminToast({ show: true, message: 'Ponto cadastrado com sucesso no Firebase!' });
       }
       setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
@@ -878,26 +1413,134 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
   };
 
   const handleAddResident = async () => {
-    if (!newResident.name || !newResident.address) return;
-    try {
-      await addDoc(collection(db, 'residents'), newResident);
-      setAdminToast({ show: true, message: 'Morador cadastrado com sucesso no Firebase!' });
+    const trimmedName = newResident.name.trim();
+    const category = newResident.category || 'RESIDENT';
+    const categoryTitle = 
+      category === 'SCHOOL' ? 'Escola' :
+      category === 'DAYCARE' ? 'Creche' : 'Morador';
+
+    if (!trimmedName) {
+      const label = category === 'SCHOOL' ? 'da escola' : category === 'DAYCARE' ? 'da creche' : 'do morador';
+      setResidentFormError(`Por favor, digite o nome ${label}.`);
+      setAdminToast({ show: true, message: `Informe o nome ${label}!` });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+      return;
+    }
+
+    // Checagem de duplicata com aviso antes de salvar
+    const exactMatch = residents.find(r => (r.name || '').trim().toLowerCase() === trimmedName.toLowerCase());
+    if (exactMatch && !duplicateWarningAcknowledged) {
+      setResidentFormError(`Atenção: Já existe um cadastro com o nome "${exactMatch.name}" no sítio "${exactMatch.neighborhood || exactMatch.address || 'Inhapi'}". Se deseja salvar mesmo assim, clique em Salvar novamente ou edite o cadastro existente.`);
+      setDuplicateWarningAcknowledged(true);
+      setAdminToast({ show: true, message: `Atenção: "${exactMatch.name}" já está cadastrado!` });
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 4500);
+      return;
+    }
+
+    setResidentFormError('');
+    setIsSavingResident(true);
+
+    const trimmedNeighborhood = newResident.neighborhood.trim();
+    let finalAddress = newResident.address.trim();
+    if (!finalAddress) {
+      finalAddress = trimmedNeighborhood ? `Sítio ${trimmedNeighborhood}` : 'Inhapi';
+    }
+
+    const payload: any = {
+      name: trimmedName,
+      address: finalAddress,
+      neighborhood: trimmedNeighborhood || 'Inhapi',
+      sector: newResident.sector?.trim() || trimmedNeighborhood || 'Inhapi',
+      preferredDriver: newResident.preferredDriver?.trim() || '',
+      phone: newResident.phone.trim(),
+      referencePoint: newResident.referencePoint.trim(),
+      councilman: newResident.councilman.trim(),
+      category: category,
+      lat: -9.2201,
+      lng: -36.3503,
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      await addDoc(collection(db, 'residents'), payload);
+
+      // Se for Escola ou Creche, cadastra também em 'sitios' para aparecer fixo no mapa operacional
+      if (category === 'SCHOOL' || category === 'DAYCARE') {
+        try {
+          await addDoc(collection(db, 'sitios'), {
+            name: trimmedName,
+            description: `${categoryTitle} cadastrada pela Secretaria${trimmedNeighborhood ? ` - Sítio ${trimmedNeighborhood}` : ''}`,
+            lat: -9.2201,
+            lng: -36.3503,
+            type: category,
+            fuelType: 'NONE',
+            referencePoint: newResident.referencePoint.trim()
+          });
+        } catch (sitioErr) {
+          console.warn("Could not sync to sitios:", sitioErr);
+        }
+      }
+
+      setAdminToast({ show: true, message: `${categoryTitle} "${trimmedName}" cadastrado(a) com sucesso!` });
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 3500);
+      setShowAddResident(false);
+      setShowNameAutocomplete(false);
+      setDuplicateWarningAcknowledged(false);
+      setNewResident({ 
+        name: '', 
+        address: '', 
+        neighborhood: '', 
+        phone: '', 
+        referencePoint: '', 
+        councilman: '',
+        category: 'RESIDENT',
+        preferredDriver: '',
+        sector: ''
+      });
+      setIsAddingCouncilmanInResident(false);
+      setInlineCouncilmanName('');
     } catch (err: any) {
       console.error("Firestore save failed:", err);
       const tempId = 'temp-res-' + Date.now();
-      const rObj = { id: tempId, ...newResident } as Resident;
+      const rObj = { id: tempId, ...payload } as Resident;
       setResidents(prev => [...prev, rObj]);
-      setAdminToast({ show: true, message: 'Salvo localmente (Operando em Contingência)' });
+
+      if (category === 'SCHOOL' || category === 'DAYCARE') {
+        const sObj: Sitio = {
+          id: 'temp-sitio-' + Date.now(),
+          name: trimmedName,
+          description: `${categoryTitle} - ${trimmedNeighborhood || 'Inhapi'}`,
+          lat: -9.2201,
+          lng: -36.3503,
+          type: category,
+          fuelType: 'NONE',
+          referencePoint: newResident.referencePoint.trim()
+        };
+        setSitios(prev => [...prev, sObj]);
+      }
+
+      setAdminToast({ show: true, message: `${categoryTitle} salvo(a) localmente (Operando em Contingência)` });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 4000);
+      setShowAddResident(false);
+      setShowNameAutocomplete(false);
+      setDuplicateWarningAcknowledged(false);
+      setNewResident({ 
+        name: '', 
+        address: '', 
+        neighborhood: '', 
+        phone: '', 
+        referencePoint: '', 
+        councilman: '',
+        category: 'RESIDENT'
+      });
+      setIsAddingCouncilmanInResident(false);
+      setInlineCouncilmanName('');
+
       if (err?.message?.toLowerCase().includes('quota') || err?.message?.toLowerCase().includes('resource-exhausted')) {
         window.dispatchEvent(new CustomEvent('firebase-quota-exceeded'));
       }
     } finally {
-      setNewResident({ name: '', address: '', neighborhood: '', phone: '', referencePoint: '', councilman: '' });
-      setIsAddingCouncilmanInResident(false);
-      setInlineCouncilmanName('');
-      setShowAddResident(false);
+      setIsSavingResident(false);
     }
   };
 
@@ -925,14 +1568,27 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
 
   const handleAddDriver = async () => {
     if (!newDriver.name || !newDriver.phone) return;
+    const payload: any = {
+      name: newDriver.name.trim(),
+      phone: newDriver.phone.trim(),
+      sector: newDriver.sector ? newDriver.sector.trim() : '',
+      address: newDriver.address ? newDriver.address.trim() : '',
+      homeSitio: newDriver.homeSitio ? newDriver.homeSitio.trim() : ''
+    };
+    if (newDriver.homeLat && newDriver.homeLng) {
+      payload.homeLat = Number(newDriver.homeLat);
+      payload.homeLng = Number(newDriver.homeLng);
+      payload.homeGpsSavedAt = new Date().toISOString();
+      payload.homeGpsAccuracy = 10;
+    }
     try {
-      await addDoc(collection(db, 'drivers'), newDriver);
+      await addDoc(collection(db, 'drivers'), payload);
       setAdminToast({ show: true, message: 'Motorista cadastrado com sucesso no Firebase!' });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
     } catch (err: any) {
       console.error("Firestore save failed:", err);
       const tempId = 'temp-drv-' + Date.now();
-      const drvObj = { id: tempId, ...newDriver } as Driver;
+      const drvObj = { id: tempId, ...payload } as Driver;
       setDrivers(prev => [...prev, drvObj]);
       setAdminToast({ show: true, message: 'Salvo localmente (Operando em Contingência)' });
       setTimeout(() => setAdminToast({ show: false, message: '' }), 4000);
@@ -940,10 +1596,378 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
         window.dispatchEvent(new CustomEvent('firebase-quota-exceeded'));
       }
     } finally {
-      setNewDriver({ name: '', phone: '' });
+      setNewDriver({ name: '', phone: '', sector: '', address: '', homeSitio: '', homeLat: 0, homeLng: 0 });
       setShowAddDriver(false);
     }
   };
+
+  // ==========================================
+  // ABASTECIMENTO E CONSUMO DE COMBUSTÍVEL POR SETOR
+  // ==========================================
+
+  // Abre modal para novo registro de abastecimento
+  const handleOpenAddFuelModal = (suggestedTruckId?: string) => {
+    setEditingFuelLog(null);
+    setFuelFormError('');
+
+    const targetTruckId = suggestedTruckId || (trucks.length > 0 ? trucks[0].id : '');
+    const selectedTruck = trucks.find(t => t.id === targetTruckId);
+    
+    // Procura último abastecimento desse caminhão para sugerir o odômetro anterior
+    const truckLogs = fuelLogs.filter(f => f.truckId === targetTruckId);
+    const lastKm = truckLogs.length > 0 ? truckLogs[0].currentKm : '';
+
+    setFuelFormData({
+      truckId: targetTruckId,
+      plate: selectedTruck?.plate || '',
+      driverName: selectedTruck?.driverName || '',
+      sector: selectedTruck?.sector || '',
+      date: new Date().toISOString().slice(0, 16),
+      liters: '',
+      pricePerLiter: '6.45',
+      totalCost: '',
+      fuelType: 'DIESEL_S10',
+      currentKm: '',
+      previousKm: lastKm,
+      gasStation: 'Posto Central Inhapi',
+      invoiceNumber: '',
+      photoReceipt: '',
+      notes: ''
+    });
+    setShowAddFuelModal(true);
+  };
+
+  // Abre modal para edição
+  const handleOpenEditFuelModal = (log: FuelLog) => {
+    setEditingFuelLog(log);
+    setFuelFormError('');
+    setFuelFormData({
+      truckId: log.truckId || '',
+      plate: log.plate || '',
+      driverName: log.driverName || '',
+      sector: log.sector || '',
+      date: log.date ? new Date(log.date).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16),
+      liters: log.liters ?? '',
+      pricePerLiter: log.pricePerLiter ?? '',
+      totalCost: log.totalCost ?? '',
+      fuelType: log.fuelType || 'DIESEL_S10',
+      currentKm: log.currentKm ?? '',
+      previousKm: log.previousKm ?? '',
+      gasStation: log.gasStation || 'Posto Central Inhapi',
+      invoiceNumber: log.invoiceNumber || '',
+      photoReceipt: log.photoReceipt || '',
+      notes: log.notes || ''
+    });
+    setShowAddFuelModal(true);
+  };
+
+  // Seleção de caminhão no formulário
+  const handleTruckSelectionInFuelForm = (targetTruckId: string) => {
+    const selectedTruck = trucks.find(t => t.id === targetTruckId);
+    const truckLogs = fuelLogs.filter(f => f.truckId === targetTruckId && (!editingFuelLog || f.id !== editingFuelLog.id));
+    const lastKm = truckLogs.length > 0 ? truckLogs[0].currentKm : '';
+
+    setFuelFormData(prev => ({
+      ...prev,
+      truckId: targetTruckId,
+      plate: selectedTruck?.plate || '',
+      driverName: selectedTruck?.driverName || prev.driverName,
+      sector: selectedTruck?.sector || prev.sector,
+      previousKm: prev.previousKm !== '' ? prev.previousKm : lastKm
+    }));
+  };
+
+  // Salvar Abastecimento (Novo ou Edição)
+  const handleSaveFuelLog = async () => {
+    if (!fuelFormData.truckId) {
+      setFuelFormError('Selecione um caminhão-pipa.');
+      return;
+    }
+    const litersNum = Number(fuelFormData.liters);
+    if (!litersNum || litersNum <= 0) {
+      setFuelFormError('Informe a quantidade de litros abastecidos (maior que zero).');
+      return;
+    }
+    const currentKmNum = Number(fuelFormData.currentKm);
+    if (fuelFormData.currentKm === '' || isNaN(currentKmNum) || currentKmNum < 0) {
+      setFuelFormError('Informe a quilometragem atual do odômetro.');
+      return;
+    }
+    const prevKmNum = fuelFormData.previousKm !== '' ? Number(fuelFormData.previousKm) : 0;
+    if (prevKmNum > 0 && currentKmNum < prevKmNum) {
+      setFuelFormError(`O odômetro atual (${currentKmNum} km) não pode ser inferior ao anterior (${prevKmNum} km).`);
+      return;
+    }
+
+    const distanceKm = Math.max(0, currentKmNum - prevKmNum);
+    const kmPerLiter = distanceKm > 0 && litersNum > 0 ? Number((distanceKm / litersNum).toFixed(2)) : 0;
+    const litersPerKm = distanceKm > 0 && litersNum > 0 ? Number((litersNum / distanceKm).toFixed(3)) : 0;
+
+    let pricePerLiterNum = Number(fuelFormData.pricePerLiter) || 0;
+    let totalCostNum = Number(fuelFormData.totalCost) || 0;
+
+    if (totalCostNum <= 0 && pricePerLiterNum > 0 && litersNum > 0) {
+      totalCostNum = Number((pricePerLiterNum * litersNum).toFixed(2));
+    } else if (pricePerLiterNum <= 0 && totalCostNum > 0 && litersNum > 0) {
+      pricePerLiterNum = Number((totalCostNum / litersNum).toFixed(2));
+    }
+
+    const costPerKm = distanceKm > 0 && totalCostNum > 0 ? Number((totalCostNum / distanceKm).toFixed(2)) : 0;
+
+    const payload: Omit<FuelLog, 'id'> = {
+      truckId: fuelFormData.truckId,
+      plate: (fuelFormData.plate || 'SEM PLACA').toUpperCase(),
+      driverName: fuelFormData.driverName || 'Motorista Não Identificado',
+      sector: fuelFormData.sector.trim() || 'Inhapi (Centro)',
+      date: fuelFormData.date ? new Date(fuelFormData.date).toISOString() : new Date().toISOString(),
+      liters: litersNum,
+      pricePerLiter: pricePerLiterNum,
+      totalCost: totalCostNum,
+      fuelType: fuelFormData.fuelType || 'DIESEL_S10',
+      currentKm: currentKmNum,
+      previousKm: prevKmNum,
+      distanceKm,
+      kmPerLiter,
+      litersPerKm,
+      costPerKm,
+      gasStation: fuelFormData.gasStation.trim() || 'Posto de Inhapi',
+      invoiceNumber: fuelFormData.invoiceNumber.trim(),
+      photoReceipt: fuelFormData.photoReceipt || '',
+      notes: fuelFormData.notes.trim(),
+      createdAt: editingFuelLog?.createdAt || new Date().toISOString()
+    };
+
+    setIsSavingFuelLog(true);
+    setFuelFormError('');
+    try {
+      if (editingFuelLog) {
+        await updateDoc(doc(db, 'fuel_logs', editingFuelLog.id), payload);
+        setAdminToast({ show: true, message: 'Abastecimento atualizado com sucesso!' });
+      } else {
+        await addDoc(collection(db, 'fuel_logs'), payload);
+        setAdminToast({ show: true, message: 'Abastecimento registrado com sucesso no Firebase!' });
+      }
+      setShowAddFuelModal(false);
+      setEditingFuelLog(null);
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+    } catch (err: any) {
+      console.error("Firestore save fuel log failed:", err);
+      const tempId = editingFuelLog ? editingFuelLog.id : 'temp-fuel-' + Date.now();
+      const localObj = { id: tempId, ...payload } as FuelLog;
+      if (editingFuelLog) {
+        setFuelLogs(prev => prev.map(f => f.id === editingFuelLog.id ? localObj : f));
+      } else {
+        setFuelLogs(prev => [localObj, ...prev]);
+      }
+      setAdminToast({ show: true, message: 'Salvo localmente (Modo Contingência)' });
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 4000);
+      setShowAddFuelModal(false);
+      setEditingFuelLog(null);
+    } finally {
+      setIsSavingFuelLog(false);
+    }
+  };
+
+  // Excluir Abastecimento
+  const handleDeleteFuelLog = async (logId: string) => {
+    try {
+      await deleteDoc(doc(db, 'fuel_logs', logId));
+      setAdminToast({ show: true, message: 'Registro de abastecimento excluído.' });
+    } catch (e: any) {
+      console.warn("Could not delete fuel log from firestore:", e);
+      setFuelLogs(prev => prev.filter(f => f.id !== logId));
+      setAdminToast({ show: true, message: 'Registro removido localmente.' });
+    }
+    setFuelDeleteConfirm(null);
+    setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+  };
+
+  // Exportar Relatório de Abastecimento e Consumo por Setor em CSV
+  const handleExportFuelLogsCSV = () => {
+    if (fuelLogs.length === 0) {
+      setAdminToast({ show: true, message: 'Nenhum registro de abastecimento para exportar.' });
+      setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+      return;
+    }
+    const headers = [
+      'Data/Hora',
+      'Placa',
+      'Motorista',
+      'Setor',
+      'Tipo de Combustivel',
+      'Litros Abastecidos',
+      'Odometro Anterior (KM)',
+      'Odometro Atual (KM)',
+      'Distancia Percorrida (KM)',
+      'Consumo Medio (KM/L)',
+      'Consumo (Litros/KM)',
+      'Preco por Litro (R$)',
+      'Valor Total (R$)',
+      'Custo por KM (R$/KM)',
+      'Posto / Fornecedor',
+      'Nota Fiscal / Requisicao',
+      'Observacoes'
+    ];
+    const rows = fuelLogs.map(l => [
+      l.date ? new Date(l.date).toLocaleString('pt-BR') : '',
+      l.plate || '',
+      `"${(l.driverName || '').replace(/"/g, '""')}"`,
+      `"${(l.sector || '').replace(/"/g, '""')}"`,
+      l.fuelType || 'DIESEL_S10',
+      l.liters || 0,
+      l.previousKm || 0,
+      l.currentKm || 0,
+      l.distanceKm || 0,
+      l.kmPerLiter || 0,
+      l.litersPerKm || 0,
+      (l.pricePerLiter || 0).toFixed(2),
+      (l.totalCost || 0).toFixed(2),
+      (l.costPerKm || 0).toFixed(2),
+      `"${(l.gasStation || '').replace(/"/g, '""')}"`,
+      `"${(l.invoiceNumber || '').replace(/"/g, '""')}"`,
+      `"${(l.notes || '').replace(/"/g, '""')}"`
+    ]);
+    const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `abastecimento_consumo_setores_inhapi_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setAdminToast({ show: true, message: 'Relatório CSV de combustível exportado com sucesso!' });
+    setTimeout(() => setAdminToast({ show: false, message: '' }), 3000);
+  };
+
+  // Métricas Consolidadas de Consumo por Setor
+  const sectorConsumptionStats = useMemo(() => {
+    const sectorMap: Record<string, {
+      sector: string;
+      totalLiters: number;
+      totalDistanceKm: number;
+      totalCost: number;
+      logCount: number;
+      trucks: Set<string>;
+      drivers: Set<string>;
+      logs: FuelLog[];
+    }> = {};
+
+    fuelLogs.forEach(log => {
+      const sec = (log.sector || 'Inhapi (Centro)').trim();
+      if (!sectorMap[sec]) {
+        sectorMap[sec] = {
+          sector: sec,
+          totalLiters: 0,
+          totalDistanceKm: 0,
+          totalCost: 0,
+          logCount: 0,
+          trucks: new Set(),
+          drivers: new Set(),
+          logs: []
+        };
+      }
+      sectorMap[sec].totalLiters += Number(log.liters) || 0;
+      sectorMap[sec].totalDistanceKm += Number(log.distanceKm) || 0;
+      sectorMap[sec].totalCost += Number(log.totalCost) || 0;
+      sectorMap[sec].logCount += 1;
+      if (log.plate) sectorMap[sec].trucks.add(log.plate);
+      if (log.driverName) sectorMap[sec].drivers.add(log.driverName);
+      sectorMap[sec].logs.push(log);
+    });
+
+    return Object.values(sectorMap).map(item => {
+      const avgKmPerLiter = item.totalLiters > 0 && item.totalDistanceKm > 0 
+        ? Number((item.totalDistanceKm / item.totalLiters).toFixed(2)) 
+        : 0;
+      const avgLitersPerKm = item.totalDistanceKm > 0 && item.totalLiters > 0 
+        ? Number((item.totalLiters / item.totalDistanceKm).toFixed(3)) 
+        : 0;
+      const avgCostPerKm = item.totalDistanceKm > 0 && item.totalCost > 0 
+        ? Number((item.totalCost / item.totalDistanceKm).toFixed(2)) 
+        : 0;
+      
+      let efficiency: 'EXCELLENT' | 'NORMAL' | 'WARNING' = 'NORMAL';
+      if (avgKmPerLiter >= 2.8) efficiency = 'EXCELLENT';
+      else if (avgKmPerLiter > 0 && avgKmPerLiter < 2.2) efficiency = 'WARNING';
+
+      return {
+        ...item,
+        avgKmPerLiter,
+        avgLitersPerKm,
+        avgCostPerKm,
+        efficiency,
+        trucksList: Array.from(item.trucks),
+        driversList: Array.from(item.drivers)
+      };
+    }).sort((a, b) => b.totalDistanceKm - a.totalDistanceKm);
+  }, [fuelLogs]);
+
+  // KPIs Totais da Frota de Caminhões-Pipa
+  const fleetFuelKPIs = useMemo(() => {
+    let totalLiters = 0;
+    let totalDistanceKm = 0;
+    let totalCost = 0;
+
+    fuelLogs.forEach(f => {
+      totalLiters += Number(f.liters) || 0;
+      totalDistanceKm += Number(f.distanceKm) || 0;
+      totalCost += Number(f.totalCost) || 0;
+    });
+
+    const avgKmPerLiter = totalLiters > 0 && totalDistanceKm > 0 
+      ? Number((totalDistanceKm / totalLiters).toFixed(2)) 
+      : 0;
+    const avgLitersPerKm = totalDistanceKm > 0 && totalLiters > 0 
+      ? Number((totalLiters / totalDistanceKm).toFixed(3)) 
+      : 0;
+    const avgCostPerKm = totalDistanceKm > 0 && totalCost > 0 
+      ? Number((totalCost / totalDistanceKm).toFixed(2)) 
+      : 0;
+
+    return {
+      totalLogs: fuelLogs.length,
+      totalLiters: Math.round(totalLiters),
+      totalDistanceKm: Math.round(totalDistanceKm),
+      totalCost,
+      avgKmPerLiter,
+      avgLitersPerKm,
+      avgCostPerKm
+    };
+  }, [fuelLogs]);
+
+  // Registros de Abastecimento Filtrados
+  const filteredFuelLogs = useMemo(() => {
+    return fuelLogs.filter(log => {
+      if (fuelSectorFilter !== 'ALL' && (log.sector || '').toLowerCase() !== fuelSectorFilter.toLowerCase()) {
+        return false;
+      }
+      if (fuelTruckFilter !== 'ALL' && log.truckId !== fuelTruckFilter && log.plate !== fuelTruckFilter) {
+        return false;
+      }
+      if (fuelPeriodFilter === 'TODAY') {
+        const logDateStr = new Date(log.date).toLocaleDateString('en-CA');
+        if (logDateStr !== todayStr) return false;
+      } else if (fuelPeriodFilter === 'WEEK') {
+        const logTime = new Date(log.date).getTime();
+        const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        if (logTime < weekAgo) return false;
+      } else if (fuelPeriodFilter === 'MONTH') {
+        const logTime = new Date(log.date).getTime();
+        const monthAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        if (logTime < monthAgo) return false;
+      }
+      if (fuelSearch.trim()) {
+        const q = fuelSearch.toLowerCase().trim();
+        const plateMatch = (log.plate || '').toLowerCase().includes(q);
+        const driverMatch = (log.driverName || '').toLowerCase().includes(q);
+        const sectorMatch = (log.sector || '').toLowerCase().includes(q);
+        const stationMatch = (log.gasStation || '').toLowerCase().includes(q);
+        const invoiceMatch = (log.invoiceNumber || '').toLowerCase().includes(q);
+        return plateMatch || driverMatch || sectorMatch || stationMatch || invoiceMatch;
+      }
+      return true;
+    });
+  }, [fuelLogs, fuelSectorFilter, fuelTruckFilter, fuelPeriodFilter, fuelSearch, todayStr]);
 
   const [deleteConfirm, setDeleteConfirm] = useState<{
     show: boolean;
@@ -1022,10 +2046,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             </div>
             <button
               onClick={() => setDeleteConfirm(null)}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           </div>
           <div>
@@ -1131,10 +2156,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 setFinishRoutePassword('');
                 setFinishRouteError('');
               }}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           </div>
           <div>
@@ -1207,10 +2233,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 setDeleteHistoryPassword('');
                 setDeleteHistoryError('');
               }}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           </div>
           <div>
@@ -1306,10 +2333,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             </h3>
             <button
               onClick={() => setEditItem(null)}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           </div>
           
@@ -1317,7 +2345,47 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             {collectionName === 'residents' && (
               <>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">Nome Completo</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">Tipo / Categoria</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFields({ ...fields, category: 'RESIDENT' })}
+                      className={`py-2 rounded-xl text-xs font-bold uppercase transition-all border flex items-center justify-center gap-1 cursor-pointer ${
+                        (!fields.category || fields.category === 'RESIDENT')
+                          ? 'bg-emerald-600 border-emerald-500 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Home size={12} /> Morador
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFields({ ...fields, category: 'SCHOOL' })}
+                      className={`py-2 rounded-xl text-xs font-bold uppercase transition-all border flex items-center justify-center gap-1 cursor-pointer ${
+                        fields.category === 'SCHOOL'
+                          ? 'bg-indigo-600 border-indigo-500 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <School size={12} /> Escola
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFields({ ...fields, category: 'DAYCARE' })}
+                      className={`py-2 rounded-xl text-xs font-bold uppercase transition-all border flex items-center justify-center gap-1 cursor-pointer ${
+                        fields.category === 'DAYCARE'
+                          ? 'bg-pink-600 border-pink-500 text-white shadow-xs'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Baby size={12} /> Creche
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Nome {fields.category === 'SCHOOL' ? 'da Escola' : fields.category === 'DAYCARE' ? 'da Creche' : 'Completo do Morador'}
+                  </label>
                   <input 
                     type="text" 
                     value={fields.name || ''} 
@@ -1431,6 +2499,40 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                     </div>
                   )}
                 </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Setor / Região Específica
+                  </label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={fields.sector || ''} 
+                    onChange={e => setFields({ ...fields, sector: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Motorista Vinculado / Notificado para este Morador
+                  </label>
+                  <select 
+                    value={fields.preferredDriver || ''} 
+                    onChange={e => setFields({ ...fields, preferredDriver: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm font-semibold"
+                  >
+                    <option value="">Detecção Automática (pelo Sítio/Histórico)</option>
+                    {drivers.map(d => (
+                      <option key={d.id} value={d.name}>
+                        🚛 {d.name} {d.sector ? `(Setor: ${d.sector})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-slate-400 pl-1 font-medium">
+                    Ao definir, o secretário verá a notificação indicando este motorista para entregas deste morador.
+                  </p>
+                </div>
               </>
             )}
 
@@ -1456,6 +2558,18 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                     {drivers.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
                   </select>
                 </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Setor / Bairros / Sítios de Atuação
+                  </label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={fields.sector || ''} 
+                    onChange={e => setFields({ ...fields, sector: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm"
+                  />
+                </div>
               </>
             )}
 
@@ -1478,6 +2592,65 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                     onChange={e => setFields({ ...fields, phone: e.target.value })}
                     className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm font-mono"
                   />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Setor / Sítios / Região Atendida
+                  </label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={fields.sector || ''} 
+                    onChange={e => setFields({ ...fields, sector: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Endereço / Base do Motorista
+                  </label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Centro, Rua São Vicente"
+                    value={fields.address || ''} 
+                    onChange={e => setFields({ ...fields, address: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Sítio onde Mora (Residência)
+                  </label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={fields.homeSitio || ''} 
+                    onChange={e => setFields({ ...fields, homeSitio: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-4 py-3 text-sm font-semibold"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1 font-mono">
+                    Coordenadas GPS da Residência ({fields.homeGpsSavedAt ? '✅ Salvo via Celular' : 'Não capturado'})
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input 
+                      type="number" 
+                      step="any"
+                      placeholder="Latitude"
+                      value={fields.homeLat ?? ''} 
+                      onChange={e => setFields({ ...fields, homeLat: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-3 py-2 text-xs font-mono"
+                    />
+                    <input 
+                      type="number" 
+                      step="any"
+                      placeholder="Longitude"
+                      value={fields.homeLng ?? ''} 
+                      onChange={e => setFields({ ...fields, homeLng: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-brand-primary outline-none rounded-xl px-3 py-2 text-xs font-mono"
+                    />
+                  </div>
                 </div>
               </>
             )}
@@ -1550,10 +2723,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             <h3 className="text-xl font-black">Confirmar Alteração</h3>
             <button
               onClick={() => setStatusConfirmationModal(null)}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+              title="Voltar"
+              aria-label="Voltar"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           </div>
           <p className="text-slate-500 mb-6">Deseja alterar o status da entrega de <span className="font-bold">{delivery.residentName}</span> para <span className="font-bold">{nextStatus === 'IN_ROUTE' ? 'Em Rota' : 'Entregue'}</span>?</p>
@@ -1770,11 +2944,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
           {activeTab !== 'map' && (
             <button
               onClick={() => setActiveTab('map')}
-              className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 shrink-0 cursor-pointer border border-slate-200/80"
+              className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 shrink-0 cursor-pointer border border-slate-200/80"
               title="Voltar para o Painel Inicial"
+              aria-label="Voltar para o Painel Inicial"
             >
-              <ArrowLeft size={13} />
-              <span>Voltar</span>
+              <ArrowLeft size={15} />
             </button>
           )}
           <img 
@@ -1784,14 +2958,22 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             onError={(e) => { e.currentTarget.src = '/logo-inhapi.png'; }} 
           />
           <div className="min-w-0">
-            <h1 className="font-black text-[11px] sm:text-sm uppercase tracking-tight truncate leading-tight">Secretaria</h1>
+            <div className="flex items-center gap-1.5">
+              <h1 className="font-black text-[11px] sm:text-sm uppercase tracking-tight truncate leading-tight">
+                {userRole === 'admin' ? 'Administração' : 'Secretaria'}
+              </h1>
+              <span className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded ${userRole === 'admin' ? 'bg-red-500/10 text-red-600 border border-red-200' : 'bg-blue-500/10 text-blue-600 border border-blue-200'}`}>
+                {userRole === 'admin' ? 'ADM' : 'SEC'}
+              </span>
+            </div>
             <p className="text-[7px] sm:text-[9px] font-black text-brand-teal tracking-widest uppercase leading-none">Operação Pipa</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
+          <ThemeSelector variant="compact-light" />
           <button 
             onClick={() => setIsSidebarOpen(true)}
-            className="p-2 bg-slate-50 rounded-xl text-slate-600 active:scale-90 transition-all border border-slate-100"
+            className="p-2 bg-slate-50 rounded-xl text-slate-600 active:scale-90 transition-all border border-slate-100 cursor-pointer"
             title="Abrir Menu"
           >
             <div className="flex flex-col gap-0.5 w-4 h-4 items-center justify-center">
@@ -1832,20 +3014,27 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               onError={(e) => { e.currentTarget.src = '/logo-inhapi.png'; }} 
             />
             <div className="min-w-0">
-              <h1 className="font-bold text-sm tracking-tight text-slate-900 truncate">Operação Pipa</h1>
+              <div className="flex items-center gap-1.5">
+                <h1 className="font-bold text-sm tracking-tight text-slate-900 truncate">Operação Pipa</h1>
+                <span className={`text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full ${userRole === 'admin' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>
+                  {userRole === 'admin' ? 'Admin' : 'Secr.'}
+                </span>
+              </div>
               <p className="text-[11px] font-medium text-slate-400 truncate">Prefeitura de Inhapi / AL</p>
             </div>
           </div>
-          <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
+          <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 cursor-pointer">
             <X size={20} />
           </button>
         </div>
 
         <nav className="flex flex-col gap-1">
           {[
-            { id: 'map', icon: LayoutDashboard, label: 'Painel de Controle' },
+            { id: 'operational', icon: LayoutDashboard, label: 'Monitoramento Operacional' },
+            { id: 'map', icon: Compass, label: 'Monitoramento via Mapa' },
             { id: 'deliveries', icon: ClipboardList, label: 'Relatórios & Histórico' },
-            { id: 'sitios', icon: MapPin, label: 'Abastecimentos' },
+            { id: 'fuel', icon: Fuel, label: 'Abastecimento & Consumo' },
+            { id: 'sitios', icon: MapPin, label: 'Pontos de Captação' },
             { id: 'residents', icon: Users, label: 'Cadastros' },
             { id: 'sync', icon: Database, label: 'Sincronização' },
             { id: 'settings', icon: Settings, label: 'Ajustes' },
@@ -1869,9 +3058,21 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                   <span className="truncate">{item.label}</span>
                 </div>
                 
-                {item.id === 'deliveries' && pendingDeliveries > 0 && (
-                  <span className="flex items-center justify-center bg-rose-500 text-white font-mono text-[10px] min-w-[20px] h-5 px-1.5 rounded-full shadow-xs tabular-nums">
+                {item.id === 'operational' && pendingDeliveries > 0 && (
+                  <span className="flex items-center justify-center bg-rose-500 text-white font-mono text-[10px] min-w-[20px] h-5 px-1.5 rounded-full shadow-xs tabular-nums" title={`${pendingDeliveries} pedidos pendentes`}>
                     {pendingDeliveries}
+                  </span>
+                )}
+
+                {item.id === 'deliveries' && totalCompletedDeliveries > 0 && (
+                  <span className="flex items-center justify-center bg-emerald-500 text-white font-mono text-[10px] min-w-[20px] h-5 px-1.5 rounded-full shadow-xs tabular-nums">
+                    {totalCompletedDeliveries}
+                  </span>
+                )}
+
+                {item.id === 'fuel' && fuelLogs.length > 0 && (
+                  <span className="flex items-center justify-center bg-amber-500 text-white font-mono text-[10px] min-w-[20px] h-5 px-1.5 rounded-full shadow-xs tabular-nums" title={`${fuelLogs.length} abastecimentos registrados`}>
+                    {fuelLogs.length}
                   </span>
                 )}
               </button>
@@ -1900,6 +3101,10 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
           </button>
 
           <div className="pt-0.5">
+            <ThemeSelector variant="sidebar" />
+          </div>
+
+          <div className="pt-0.5">
             <AndroidInstallBanner variant="button" className="w-full justify-center" />
           </div>
 
@@ -1925,19 +3130,33 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
       </aside>
 
       <main className="flex-1 overflow-auto flex flex-col pb-0 relative z-0">
-        {activeTab === 'map' && (
-          <div className="p-2.5 sm:p-5 lg:p-6 min-h-full lg:h-full flex flex-col gap-2.5 sm:gap-4 lg:gap-5">
+        {/* 1. MONITORAMENTO OPERACIONAL - Lista de Pedidos de Água de Moradores */}
+        {activeTab === 'operational' && (
+          <div className="p-2.5 sm:p-5 lg:p-6 min-h-full flex flex-col gap-3 sm:gap-4 lg:gap-5">
             <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2.5 sm:gap-3">
               <div>
-                <h2 className="text-base sm:text-xl font-bold tracking-tight text-slate-900">
-                  Monitoramento Operacional
-                </h2>
-                <p className="text-slate-500 text-[11px] sm:text-xs mt-0.5 leading-snug">
-                  Acompanhamento da frota de caminhões-pipa e rotas ativas em Inhapi.
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 bg-blue-100 text-blue-700 rounded-lg">
+                    <LayoutDashboard size={18} />
+                  </span>
+                  <h2 className="text-base sm:text-xl font-bold tracking-tight text-slate-900">
+                    Monitoramento Operacional
+                  </h2>
+                </div>
+                <p className="text-slate-500 text-[11px] sm:text-xs mt-1 leading-snug">
+                  Gestão em tempo real dos pedidos de abastecimento de água de moradores, escolas e localidades.
                 </p>
               </div>
 
               <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => setActiveTab('map')}
+                  className="h-9 sm:h-10 px-2 sm:px-3.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-xl font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all duration-200 active:scale-[0.97] cursor-pointer"
+                  title="Abrir a tela de Monitoramento via Mapa"
+                >
+                  <Compass size={14} className="shrink-0" />
+                  <span className="truncate">Monitoramento via Mapa</span>
+                </button>
                 <button
                   onClick={() => {
                     setInServiceModalFilter('in_service');
@@ -1949,16 +3168,451 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
                   <span className="truncate">Em Serviço ({activeInServiceDrivers.length})</span>
                 </button>
+                <button 
+                  onClick={() => setShowAddDelivery(true)}
+                  className="h-9 sm:h-10 px-2 sm:px-3.5 bg-blue-600 hover:bg-blue-700 text-white border border-transparent rounded-xl font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all duration-200 active:scale-[0.97] cursor-pointer"
+                >
+                  <Plus size={14} className="shrink-0" /> 
+                  <span className="truncate">Novo Pedido</span>
+                </button>
+              </div>
+            </header>
+
+            {/* Dashboard Consolidado do Dia */}
+            <div className="grid grid-cols-3 gap-2 sm:gap-4">
+              {/* Card 1: Entregas Concluídas */}
+              <button
+                onClick={() => setActiveDashboardModal('completed')}
+                className="bg-white hover:bg-emerald-50/30 border border-slate-200/80 hover:border-emerald-300 rounded-xl sm:rounded-2xl p-2.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between shadow-xs hover:shadow-md transition-all active:scale-[0.98] text-left group cursor-pointer gap-1"
+              >
+                <div className="space-y-0.5 sm:space-y-1 min-w-0 w-full">
+                  <span className="text-[10px] sm:text-xs font-semibold text-slate-600 group-hover:text-emerald-700 transition-colors leading-tight block">
+                    Concluídas
+                  </span>
+                  <div className="flex items-baseline gap-1 flex-wrap">
+                    <span className="text-lg sm:text-3xl font-extrabold text-slate-900 font-mono tabular-nums tracking-tight leading-none">
+                      {deliveriesCompletedToday}
+                    </span>
+                    <span className="text-[10px] sm:text-xs text-emerald-600 font-semibold">Hoje</span>
+                  </div>
+                  <p className="hidden md:block text-[11px] text-slate-400 font-normal">
+                    {totalCompletedDeliveries} acumuladas no total
+                  </p>
+                </div>
+                <div className="hidden sm:flex w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 items-center justify-center shrink-0 ml-1 group-hover:scale-105 transition-transform">
+                  <CheckCircle2 size={20} className="stroke-[2.2]" />
+                </div>
+              </button>
+
+              {/* Card 2: Caminhões em Rota */}
+              <button
+                onClick={() => {
+                  setActiveDashboardModal('active_trucks');
+                  setTrucksModalFilter('all');
+                  setTrucksModalSearch('');
+                }}
+                className="bg-white hover:bg-blue-50/30 border border-slate-200/80 hover:border-blue-300 rounded-xl sm:rounded-2xl p-2.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between shadow-xs hover:shadow-md transition-all active:scale-[0.98] text-left group cursor-pointer gap-1"
+              >
+                <div className="space-y-0.5 sm:space-y-1 min-w-0 w-full">
+                  <span className="text-[10px] sm:text-xs font-semibold text-slate-600 group-hover:text-blue-700 transition-colors leading-tight block">
+                    Rastrear Frota
+                  </span>
+                  <div className="flex items-baseline gap-1 flex-wrap">
+                    <span className="text-lg sm:text-3xl font-extrabold text-slate-900 font-mono tabular-nums tracking-tight leading-none">
+                      {trucksInRoute}
+                    </span>
+                    <span className="text-[10px] sm:text-xs text-blue-600 font-semibold">Rota</span>
+                  </div>
+                  <p className="hidden md:block text-[11px] text-slate-400 font-normal">
+                    {allRegisteredDrivers.length} motoristas cadastrados
+                  </p>
+                </div>
+                <div className="hidden sm:flex w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-blue-500/10 text-blue-600 border border-blue-500/20 items-center justify-center shrink-0 ml-1 group-hover:scale-105 transition-transform">
+                  <TruckIcon size={20} className="stroke-[2.2]" />
+                </div>
+              </button>
+
+              {/* Card 3: Pedidos Pendentes */}
+              <button
+                onClick={() => setActiveDashboardModal('pending')}
+                className="bg-white hover:bg-amber-50/30 border border-slate-200/80 hover:border-amber-300 rounded-xl sm:rounded-2xl p-2.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between shadow-xs hover:shadow-md transition-all active:scale-[0.98] text-left group cursor-pointer gap-1"
+              >
+                <div className="space-y-0.5 sm:space-y-1 min-w-0 w-full">
+                  <span className="text-[10px] sm:text-xs font-semibold text-slate-600 group-hover:text-amber-700 transition-colors leading-tight block">
+                    Pendentes
+                  </span>
+                  <div className="flex items-baseline gap-1 flex-wrap">
+                    <span className="text-lg sm:text-3xl font-extrabold text-slate-900 font-mono tabular-nums tracking-tight leading-none">
+                      {pendingDeliveries}
+                    </span>
+                    <span className="text-[10px] sm:text-xs text-amber-600 font-semibold">Fila</span>
+                  </div>
+                  <p className="hidden md:block text-[11px] text-slate-400 font-normal">
+                    Aguardando liberação de rota
+                  </p>
+                </div>
+                <div className="hidden sm:flex w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-amber-500/10 text-amber-600 border border-amber-500/20 items-center justify-center shrink-0 ml-1 group-hover:scale-105 transition-transform">
+                  <Clock size={20} className="stroke-[2.2]" />
+                </div>
+              </button>
+            </div>
+
+            {/* LISTA DE PEDIDOS DE ÁGUA DE MORADORES */}
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4">
+              {/* Barra de Filtros e Busca */}
+              <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+                {/* Search Bar */}
+                <div className="relative flex-1">
+                  <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={operationalSearch}
+                    onChange={(e) => setOperationalSearch(e.target.value)}
+                    placeholder="Buscar por morador, sítio, endereço, vereador ou motorista..."
+                    className="w-full pl-9 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium focus:bg-white focus:border-blue-500 outline-none transition-all"
+                  />
+                  {operationalSearch && (
+                    <button
+                      onClick={() => setOperationalSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 rounded-md"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filtro por Setor / Sítio */}
+                <div className="flex items-center gap-2">
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider shrink-0 flex items-center gap-1 font-mono">
+                    <Filter size={12} /> Setor:
+                  </label>
+                  <select
+                    value={operationalSectorFilter}
+                    onChange={(e) => setOperationalSectorFilter(e.target.value)}
+                    className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-blue-500 focus:bg-white"
+                  >
+                    <option value="">Todos os Sítios / Setores</option>
+                    {operationalSectors.map((sec) => (
+                      <option key={sec} value={sec}>{sec}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Status Filter Tabs */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 border-b border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setOperationalStatusFilter('ALL')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shrink-0 ${
+                    operationalStatusFilter === 'ALL'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  <span>Todos os Pedidos</span>
+                  <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono font-bold ${operationalStatusFilter === 'ALL' ? 'bg-blue-800 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                    {deliveries.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOperationalStatusFilter('PENDING')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shrink-0 ${
+                    operationalStatusFilter === 'PENDING'
+                      ? 'bg-amber-500 text-slate-950 shadow-xs'
+                      : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200/60'
+                  }`}
+                >
+                  <Clock size={13} className="shrink-0" />
+                  <span>Pendentes na Fila</span>
+                  <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono font-bold ${operationalStatusFilter === 'PENDING' ? 'bg-amber-700 text-white' : 'bg-amber-200 text-amber-900'}`}>
+                    {pendingDeliveries}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOperationalStatusFilter('IN_ROUTE')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shrink-0 ${
+                    operationalStatusFilter === 'IN_ROUTE'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200/60'
+                  }`}
+                >
+                  <TruckIcon size={13} className="shrink-0" />
+                  <span>Em Rota / A Caminho</span>
+                  <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono font-bold ${operationalStatusFilter === 'IN_ROUTE' ? 'bg-blue-800 text-white' : 'bg-blue-200 text-blue-900'}`}>
+                    {deliveries.filter(d => d.status === 'IN_ROUTE').length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOperationalStatusFilter('DELIVERED_TODAY')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shrink-0 ${
+                    operationalStatusFilter === 'DELIVERED_TODAY'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/60'
+                  }`}
+                >
+                  <CheckCircle2 size={13} className="shrink-0" />
+                  <span>Concluídas Hoje</span>
+                  <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono font-bold ${operationalStatusFilter === 'DELIVERED_TODAY' ? 'bg-emerald-800 text-white' : 'bg-emerald-200 text-emerald-900'}`}>
+                    {deliveriesCompletedToday}
+                  </span>
+                </button>
+              </div>
+
+              {/* Lista dos Pedidos de Água */}
+              {filteredOperationalDeliveries.length === 0 ? (
+                <div className="py-12 flex flex-col items-center justify-center text-center px-4 space-y-3">
+                  <div className="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400">
+                    <Droplet size={28} />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-sm">Nenhum pedido de água encontrado</h3>
+                    <p className="text-xs text-slate-400 mt-1 max-w-sm">
+                      {operationalSearch || operationalSectorFilter || operationalStatusFilter !== 'ALL'
+                        ? 'Nenhum pedido corresponde aos filtros aplicados. Tente limpar os filtros de busca.'
+                        : 'Não há pedidos registrados no momento. Clique no botão abaixo para adicionar um novo pedido.'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setShowAddDelivery(true)}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm active:scale-95 cursor-pointer"
+                  >
+                    <Plus size={14} /> Novo Pedido de Água
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {filteredOperationalDeliveries.map((delivery) => {
+                    const assignedTruckObj = trucks.find(t => t.id === delivery.truckId);
+                    const matchingResident = residents.find(r => 
+                      (delivery.residentId && r.id === delivery.residentId) || 
+                      (delivery.residentName && r.name.toLowerCase() === delivery.residentName.toLowerCase())
+                    );
+                    const category = matchingResident?.category || 'RESIDENT';
+                    const categoryEmoji = category === 'SCHOOL' ? '🏫' : category === 'DAYCARE' ? '👶' : '👤';
+                    const categoryBadge = category === 'SCHOOL' ? 'Escola' : category === 'DAYCARE' ? 'Creche' : 'Morador';
+
+                    const hasGps = (typeof delivery.lat === 'number' && typeof delivery.lng === 'number' && (delivery.lat !== -9.2201 || delivery.lng !== -36.3503)) ||
+                                   (typeof (delivery as any).deliveredLat === 'number' && typeof (delivery as any).deliveredLng === 'number');
+
+                    const formattedDate = delivery.createdAt ? (() => {
+                      try {
+                        const d = new Date(delivery.createdAt);
+                        return d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                      } catch {
+                        return delivery.createdAt;
+                      }
+                    })() : '—';
+
+                    return (
+                      <div
+                        key={delivery.id}
+                        className={`rounded-2xl border p-4 transition-all duration-200 flex flex-col justify-between gap-3 shadow-xs hover:shadow-md ${
+                          delivery.status === 'DELIVERED'
+                            ? 'bg-emerald-50/20 border-emerald-200 hover:border-emerald-300'
+                            : delivery.status === 'IN_ROUTE'
+                            ? 'bg-blue-50/25 border-blue-200 hover:border-blue-300'
+                            : 'bg-white border-slate-200/90 hover:border-slate-300'
+                        }`}
+                      >
+                        {/* Top: Header with resident name and status badge */}
+                        <div className="space-y-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs">{categoryEmoji}</span>
+                                <h4 className="font-extrabold text-sm text-slate-900 truncate">
+                                  {delivery.residentName}
+                                </h4>
+                                <span className="text-[9px] font-bold px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded-md uppercase">
+                                  {categoryBadge}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 font-medium truncate mt-0.5">
+                                📍 {delivery.address || 'Endereço não informado'}
+                              </p>
+                            </div>
+
+                            {/* Status badge */}
+                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shrink-0 flex items-center gap-1 ${
+                              delivery.status === 'DELIVERED'
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                : delivery.status === 'IN_ROUTE'
+                                ? 'bg-blue-100 text-blue-800 border border-blue-300 animate-pulse'
+                                : 'bg-amber-100 text-amber-800 border border-amber-300'
+                            }`}>
+                              {delivery.status === 'DELIVERED' && <CheckCircle2 size={11} className="shrink-0" />}
+                              {delivery.status === 'IN_ROUTE' && <TruckIcon size={11} className="shrink-0" />}
+                              {delivery.status === 'PENDING' && <Clock size={11} className="shrink-0" />}
+                              <span>
+                                {delivery.status === 'DELIVERED' ? 'Entregue' : delivery.status === 'IN_ROUTE' ? 'Em Rota' : 'Pendente'}
+                              </span>
+                            </span>
+                          </div>
+
+                          {/* Extra info pills */}
+                          <div className="flex flex-wrap items-center gap-1 text-[10px] text-slate-600">
+                            {delivery.neighborhood && (
+                              <span className="px-2 py-0.5 bg-slate-100 rounded-md font-medium text-slate-600">
+                                Sítio: <strong>{delivery.neighborhood}</strong>
+                              </span>
+                            )}
+                            {delivery.referencePoint && (
+                              <span className="px-2 py-0.5 bg-slate-100 rounded-md font-medium text-slate-600">
+                                Ref: <strong>{delivery.referencePoint}</strong>
+                              </span>
+                            )}
+                            {delivery.councilman && (
+                              <span className="px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200/60 rounded-md font-bold">
+                                Indicação: {delivery.councilman}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Caminhão e Motorista Atribuído */}
+                          <div className="bg-slate-50/90 border border-slate-100 rounded-xl p-2.5 flex items-center justify-between text-xs">
+                            <div className="min-w-0 flex items-center gap-2">
+                              <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                                <TruckIcon size={14} />
+                              </div>
+                              <div className="min-w-0">
+                                <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
+                                  Caminhão / Motorista
+                                </span>
+                                <p className="font-bold text-slate-800 text-xs truncate mt-0.5">
+                                  {assignedTruckObj
+                                    ? `${assignedTruckObj.plate} • ${assignedTruckObj.driverName || 'Motorista'}`
+                                    : (delivery.truckId ? `Caminhão #${delivery.truckId}` : 'Não atribuído')}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* GPS Status Indicator */}
+                            <div className="text-right shrink-0">
+                              {hasGps ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-100/70 border border-emerald-200 px-2 py-0.5 rounded-md">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  GPS Salvo
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400 font-medium">
+                                  Sem GPS
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-[10px] text-slate-400 font-mono">
+                            Data do Pedido: {formattedDate}
+                          </div>
+                        </div>
+
+                        {/* Bottom Actions */}
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-1.5">
+                          {/* Botão Ver no Mapa */}
+                          <button
+                            onClick={() => {
+                              if (assignedTruckObj) setSelectedTruck(assignedTruckObj);
+                              setActiveTab('map');
+                            }}
+                            className="flex-1 py-1.5 px-2 bg-cyan-50 hover:bg-cyan-100 text-cyan-800 border border-cyan-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-all active:scale-95 cursor-pointer"
+                            title="Visualizar a entrega e o caminhão diretamente no Monitoramento via Mapa"
+                          >
+                            <Compass size={13} className="shrink-0 text-cyan-600" />
+                            <span>Ver no Mapa</span>
+                          </button>
+
+                          {/* Foto Comprovante */}
+                          {delivery.photo && (
+                            <button
+                              onClick={() => setSelectedPhoto(delivery.photo || null)}
+                              className="py-1.5 px-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-all active:scale-95 cursor-pointer shrink-0"
+                              title="Ver foto do comprovante de entrega"
+                            >
+                              <ImageIcon size={13} className="shrink-0" />
+                              <span className="hidden sm:inline">Foto</span>
+                            </button>
+                          )}
+
+                          {/* Alterar Status */}
+                          <button
+                            onClick={() => setStatusConfirmationModal({ delivery })}
+                            className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all active:scale-95 cursor-pointer shrink-0"
+                            title="Alterar status deste pedido (Pendente, Em Rota, Entregue)"
+                          >
+                            Status
+                          </button>
+
+                          {/* Editar */}
+                          <button
+                            onClick={() => handleEdit('deliveries', delivery)}
+                            className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer shrink-0"
+                            title="Editar Dados do Pedido"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+
+                          {/* Excluir */}
+                          <button
+                            onClick={() => handleDelete('deliveries', delivery.id)}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer shrink-0"
+                            title="Excluir Pedido"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 2. MONITORAMENTO VIA MAPA - Tela Exclusiva com Mapa em Tela Cheia */}
+        {activeTab === 'map' && (
+          <div className="p-2.5 sm:p-5 lg:p-6 min-h-full lg:h-full flex flex-col gap-2.5 sm:gap-4 lg:gap-5">
+            <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2.5 sm:gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 bg-cyan-100 text-cyan-800 rounded-lg">
+                    <Compass size={18} />
+                  </span>
+                  <h2 className="text-base sm:text-xl font-bold tracking-tight text-slate-900">
+                    Monitoramento via Mapa
+                  </h2>
+                </div>
+                <p className="text-slate-500 text-[11px] sm:text-xs mt-1 leading-snug">
+                  Visualização geográfica em tempo real da frota de caminhões-pipa, sítios, escolas e moradores mapeados via satélite/GPS.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => setActiveTab('operational')}
+                  className="h-9 sm:h-10 px-2 sm:px-3.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all duration-200 active:scale-[0.97] cursor-pointer"
+                  title="Voltar para a Lista de Pedidos de Água de Moradores"
+                >
+                  <LayoutDashboard size={14} className="shrink-0" />
+                  <span className="truncate">Lista de Pedidos</span>
+                </button>
                 <button
                   onClick={() => {
-                    setActiveTab('residents');
-                    setActiveCadastroSubTab('resident');
+                    setInServiceModalFilter('in_service');
+                    setActiveDashboardModal('in_service');
                   }}
-                  className="h-9 sm:h-10 px-2 sm:px-3.5 bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 hover:border-amber-300 rounded-xl font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all duration-200 active:scale-[0.97] cursor-pointer"
-                  title="Ir para a Lista de Moradores"
+                  className="h-9 sm:h-10 px-2 sm:px-3.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 hover:border-emerald-300 rounded-xl font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all duration-200 active:scale-[0.97] cursor-pointer"
+                  title="Ver Caminhões e Motoristas Em Serviço"
                 >
-                  <Users size={14} className="text-amber-600 shrink-0" />
-                  <span className="truncate">Moradores</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="truncate">Em Serviço ({activeInServiceDrivers.length})</span>
                 </button>
                 <button 
                   onClick={() => setShowAddDelivery(true)}
@@ -2064,6 +3718,12 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 trucks={trucks} 
                 deliveries={deliveries} 
                 sitios={sitios}
+                drivers={drivers}
+                residents={residents}
+                onSelectResidentForDelivery={(res) => {
+                  handleSelectResident(res);
+                  setShowAddDelivery(true);
+                }}
                 route={plannedRoute}
                 selectedTruckId={selectedTruck?.id}
                 onOpenDriverSelector={() => {
@@ -2096,11 +3756,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               <div className="flex items-center gap-2.5">
                 <button
                   onClick={() => setActiveTab('map')}
-                  className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                  className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                   title="Voltar para o Painel"
+                  aria-label="Voltar para o Painel"
                 >
-                  <ArrowLeft size={14} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={16} />
                 </button>
                 <h2 className="text-2xl lg:text-3xl font-black uppercase tracking-tight">Frota</h2>
               </div>
@@ -2163,11 +3823,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <div className="flex items-center gap-2.5 mb-1">
                   <button
                     onClick={() => setActiveTab('map')}
-                    className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                    className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                     title="Voltar para o Painel"
+                    aria-label="Voltar para o Painel"
                   >
-                    <ArrowLeft size={14} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={16} />
                   </button>
                   <h2 className="text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-tight text-brand-dark">Histórico de Entregas</h2>
                 </div>
@@ -2255,118 +3915,1273 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               </div>
             </div>
             
-            {/* Desktop Table */}
-            <div className="hidden lg:block bg-white rounded-3xl overflow-hidden border border-slate-200 shadow-sm">
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+            {/* Barra de Filtros e Modo de Visualização: Por Setor, Por Motorista ou Geral */}
+            <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-200 shadow-sm mb-6 space-y-4">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
-                  <h3 className="font-black text-brand-dark uppercase tracking-tight text-lg">
-                    Relação Geral de Entregas Cadastradas
+                  <span className="text-[10px] font-black uppercase tracking-wider text-blue-600 block">
+                    Modo de Organização das Entregas
+                  </span>
+                  <h3 className="text-base sm:text-lg font-black text-brand-dark uppercase tracking-tight">
+                    Distribuição Operacional das Entregas
                   </h3>
-                  <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">
-                    {deliveries.length} registros no histórico completo
-                  </p>
+                </div>
+
+                {/* Switcher de Modos: Por Setor, Por Motorista, Lista Geral */}
+                <div className="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl w-full md:w-auto overflow-x-auto">
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryViewMode('BY_SECTOR')}
+                    className={`flex-1 md:flex-initial px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                      deliveryViewMode === 'BY_SECTOR'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <MapPin size={13} />
+                    <span>Por Setor / Região</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryViewMode('BY_DRIVER')}
+                    className={`flex-1 md:flex-initial px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                      deliveryViewMode === 'BY_DRIVER'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <TruckIcon size={13} />
+                    <span>Por Motorista</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryViewMode('ALL')}
+                    className={`flex-1 md:flex-initial px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                      deliveryViewMode === 'ALL'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <Layers size={13} />
+                    <span>Lista Geral ({deliveries.length})</span>
+                  </button>
                 </div>
               </div>
-              <table className="w-full text-left">
-                <thead className="bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-widest">
-                  <tr>
-                    <th className="px-6 py-4">Morador</th>
-                    <th className="px-6 py-4">Endereço</th>
-                    <th className="px-6 py-4">Indicação (Vereador)</th>
-                    <th className="px-6 py-4 text-center">Foto</th>
-                    <th className="px-6 py-4 text-center">Status</th>
-                    <th className="px-6 py-4 text-center">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {deliveries.length === 0 ? (
-                    <tr><td colSpan={6} className="p-10 text-center text-slate-400">Nenhuma entrega registrada.</td></tr>
-                  ) : (
-                    deliveries.map(delivery => (
-                      <tr key={delivery.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="px-6 py-5 font-black text-brand-dark uppercase tracking-tight">{delivery.residentName}</td>
-                        <td className="px-6 py-5 text-sm text-slate-600">{delivery.address}</td>
-                        <td className="px-6 py-5 text-sm">
-                          {delivery.councilman ? (
-                            <span className="font-bold text-purple-700 bg-purple-50 px-2.5 py-1 rounded-lg text-xs border border-purple-200/60 inline-flex items-center gap-1">
-                              🏛️ {delivery.councilman}
-                            </span>
-                          ) : (
-                            <span className="text-slate-400 text-xs italic font-medium">Sem indicação</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-5 text-center">
-                          {delivery.photo ? (
-                            <button 
-                              onClick={() => setSelectedPhoto(delivery.photo!)}
-                              className="p-3 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all active:scale-90"
-                              title="Ver Comprovante"
+
+              {/* Filtros de Busca, Setor, Motorista e Status */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                {/* Campo de Busca Geral */}
+                <div className="relative">
+                  <Search size={14} className="absolute left-3 top-3.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar morador, sítio ou endereço..."
+                    value={deliverySearchQuery}
+                    onChange={e => setDeliverySearchQuery(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3.5 py-2.5 text-xs text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all font-medium"
+                  />
+                  {deliverySearchQuery && (
+                    <button
+                      onClick={() => setDeliverySearchQuery('')}
+                      className="absolute right-2.5 top-3 text-slate-400 hover:text-slate-600 text-xs"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filtro de Setor */}
+                <div>
+                  <select
+                    value={selectedDeliverySectorFilter}
+                    onChange={e => setSelectedDeliverySectorFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-700 outline-none focus:border-blue-500 focus:bg-white transition-all font-semibold"
+                  >
+                    <option value="ALL">📍 Todos os Setores / Sítios</option>
+                    {sectorsList.map(sec => (
+                      <option key={sec} value={sec}>
+                        📍 {sec} ({deliveries.filter(d => getDeliverySector(d).toLowerCase() === sec.toLowerCase()).length})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Filtro de Motorista */}
+                <div>
+                  <select
+                    value={selectedDeliveryDriverFilter}
+                    onChange={e => setSelectedDeliveryDriverFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-700 outline-none focus:border-blue-500 focus:bg-white transition-all font-semibold"
+                  >
+                    <option value="ALL">🚛 Todos os Motoristas / Caminhões</option>
+                    {trucks.map(t => (
+                      <option key={t.id} value={t.id}>
+                        🚛 {t.driverName} ({t.plate})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Filtro de Status */}
+                <div>
+                  <select
+                    value={deliveryStatusFilter}
+                    onChange={e => setDeliveryStatusFilter(e.target.value as any)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-700 outline-none focus:border-blue-500 focus:bg-white transition-all font-semibold"
+                  >
+                    <option value="ALL">Todos os Status ({deliveries.length})</option>
+                    <option value="PENDING">⏳ Pendentes ({deliveries.filter(d => d.status === 'PENDING').length})</option>
+                    <option value="IN_ROUTE">🚚 Em Rota ({deliveries.filter(d => d.status === 'IN_ROUTE').length})</option>
+                    <option value="DELIVERED">✅ Entregues ({deliveries.filter(d => d.status === 'DELIVERED').length})</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Informação sobre filtros ativos */}
+              {(deliverySearchQuery || selectedDeliverySectorFilter !== 'ALL' || selectedDeliveryDriverFilter !== 'ALL' || deliveryStatusFilter !== 'ALL') && (
+                <div className="flex items-center justify-between text-xs text-slate-500 bg-blue-50/60 border border-blue-200/60 rounded-xl px-3 py-1.5">
+                  <span>
+                    Exibindo <strong>{filteredDeliveriesForView.length}</strong> de <strong>{deliveries.length}</strong> entregas filtradas.
+                  </span>
+                  <button
+                    onClick={() => {
+                      setDeliverySearchQuery('');
+                      setSelectedDeliverySectorFilter('ALL');
+                      setSelectedDeliveryDriverFilter('ALL');
+                      setDeliveryStatusFilter('ALL');
+                    }}
+                    className="text-blue-600 hover:text-blue-800 font-bold uppercase text-[10px] tracking-wider cursor-pointer"
+                  >
+                    Limpar Filtros
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* VISUALIZAÇÃO 1: POR SETOR / REGIÃO */}
+            {deliveryViewMode === 'BY_SECTOR' && (
+              <div className="space-y-5">
+                {sectorGroupedDeliveries.length === 0 ? (
+                  <div className="bg-white p-12 rounded-3xl border border-slate-200 text-center text-slate-400">
+                    <MapPin size={32} className="mx-auto mb-2 text-slate-300" />
+                    <p className="font-bold text-sm">Nenhuma entrega encontrada para os filtros selecionados.</p>
+                  </div>
+                ) : (
+                  sectorGroupedDeliveries.map(group => {
+                    const isCollapsed = expandedSectors[group.sectorName] === false;
+                    const pendingCount = group.deliveries.filter(d => d.status === 'PENDING').length;
+                    const inRouteCount = group.deliveries.filter(d => d.status === 'IN_ROUTE').length;
+                    const deliveredCount = group.deliveries.filter(d => d.status === 'DELIVERED').length;
+
+                    return (
+                      <div key={group.sectorName} className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden transition-all">
+                        {/* Cabeçalho do Setor */}
+                        <div 
+                          onClick={() => setExpandedSectors(prev => ({ ...prev, [group.sectorName]: !prev[group.sectorName] }))}
+                          className="p-4 sm:p-5 bg-gradient-to-r from-slate-50 to-white border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer hover:bg-slate-50/80 transition-colors"
+                        >
+                          <div className="flex items-start sm:items-center gap-3">
+                            <div className="w-10 h-10 rounded-2xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-sm shadow-blue-500/20">
+                              <MapPin size={18} />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="font-black text-brand-dark uppercase tracking-tight text-base sm:text-lg">
+                                  {group.sectorName}
+                                </h3>
+                                <span className="bg-blue-100 text-blue-800 text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full">
+                                  {group.deliveries.length} {group.deliveries.length === 1 ? 'Entrega' : 'Entregas'}
+                                </span>
+                              </div>
+
+                              {/* Notificação do Motorista Responsável por este Setor */}
+                              {group.responsibleDriver ? (
+                                <div className="flex items-center gap-1.5 mt-1 text-xs text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-1 rounded-xl w-fit">
+                                  <Bell size={12} className="text-amber-600 shrink-0" />
+                                  <span className="font-bold">
+                                    Motorista do Setor: <strong>{group.responsibleDriver.driverName}</strong>
+                                    {group.responsibleDriver.plate ? ` (${group.responsibleDriver.plate})` : ''}
+                                  </span>
+                                  {group.responsibleDriver.address && (
+                                    <span className="text-[10px] text-slate-500 font-medium">
+                                      • Base: {group.responsibleDriver.address}
+                                    </span>
+                                  )}
+                                  {group.responsibleDriver.phone && (
+                                    <span className="text-[10px] text-slate-500 font-mono">
+                                      • {group.responsibleDriver.phone}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="text-[11px] text-slate-400 italic mt-0.5">
+                                  Nenhum motorista fixado exclusivamente para este setor
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 self-end sm:self-auto">
+                            {/* Badges de Contagem */}
+                            <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider">
+                              {pendingCount > 0 && (
+                                <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-lg border border-slate-200">
+                                  {pendingCount} Pendente{pendingCount > 1 ? 's' : ''}
+                                </span>
+                              )}
+                              {inRouteCount > 0 && (
+                                <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-lg border border-amber-200">
+                                  {inRouteCount} Em Rota
+                                </span>
+                              )}
+                              {deliveredCount > 0 && (
+                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-lg border border-emerald-200">
+                                  {deliveredCount} Concluída{deliveredCount > 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Ação rápida: Despachar entrega neste setor */}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setNewDelivery(prev => ({
+                                  ...prev,
+                                  sector: group.sectorName,
+                                  neighborhood: group.sectorName,
+                                  truckId: group.responsibleDriver?.truckId || prev.truckId
+                                }));
+                                setShowAddDelivery(true);
+                              }}
+                              className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center gap-1 shadow-xs transition-all active:scale-95 cursor-pointer"
+                              title={`Criar nova entrega para o setor ${group.sectorName}`}
                             >
-                              <ImageIcon size={20} />
+                              <Plus size={11} /> Nova Entrega
                             </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedSectors(prev => ({ ...prev, [group.sectorName]: !prev[group.sectorName] }));
+                              }}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/50"
+                            >
+                              {isCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Lista de Entregas do Setor */}
+                        {!isCollapsed && (
+                          <div className="divide-y divide-slate-100">
+                            {group.deliveries.map(delivery => {
+                              const assignedTruck = trucks.find(t => t.id === delivery.truckId);
+                              return (
+                                <div key={delivery.id} className="p-4 sm:p-5 hover:bg-slate-50/60 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                  <div className="space-y-1 min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <h4 className="font-black text-brand-dark uppercase tracking-tight text-sm">
+                                        {delivery.residentName}
+                                      </h4>
+                                      {delivery.councilman && (
+                                        <span className="text-[10px] text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200/60">
+                                          🏛️ {delivery.councilman}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-slate-600 font-medium flex items-center gap-1.5">
+                                      <MapPin size={12} className="text-slate-400 shrink-0" />
+                                      <span>{delivery.address}</span>
+                                    </p>
+                                    {delivery.referencePoint && (
+                                      <p className="text-[11px] text-slate-500 font-sans italic">
+                                        Ref: {delivery.referencePoint}
+                                      </p>
+                                    )}
+                                    <div className="flex items-center gap-2 text-[10px] text-slate-400 pt-0.5">
+                                      <span>
+                                        Caminhão / Motorista: <strong className="text-slate-700">{assignedTruck ? assignedTruck.driverName : 'Não atribuído'}</strong>
+                                        {assignedTruck?.plate ? ` (${assignedTruck.plate})` : ''}
+                                      </span>
+                                      <span>•</span>
+                                      <span>{new Date(delivery.createdAt || '').toLocaleDateString('pt-BR')}</span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                                    {delivery.photo && (
+                                      <button 
+                                        onClick={() => setSelectedPhoto(delivery.photo!)}
+                                        className="p-2 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-600 hover:text-white transition-all active:scale-95"
+                                        title="Ver Comprovante"
+                                      >
+                                        <ImageIcon size={16} />
+                                      </button>
+                                    )}
+
+                                    <button 
+                                      onClick={() => setStatusConfirmationModal({ delivery })} 
+                                      className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider border cursor-pointer ${
+                                        delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' :
+                                        delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-700 border-amber-200' : 
+                                        'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      {delivery.status === 'DELIVERED' ? 'ENTREGUE' : delivery.status === 'IN_ROUTE' ? 'EM ROTA' : 'PENDENTE'}
+                                    </button>
+
+                                    <button 
+                                      onClick={() => handleDelete('deliveries', delivery.id)}
+                                      className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-colors cursor-pointer"
+                                      title="Excluir Entrega"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* VISUALIZAÇÃO 2: POR MOTORISTA / CAMINHÃO */}
+            {deliveryViewMode === 'BY_DRIVER' && (
+              <div className="space-y-5">
+                {driverGroupedDeliveries.groups.map(group => {
+                  const isCollapsed = expandedDrivers[group.truck.id] === false;
+                  const pendingCount = group.deliveries.filter(d => d.status === 'PENDING').length;
+                  const inRouteCount = group.deliveries.filter(d => d.status === 'IN_ROUTE').length;
+                  const deliveredCount = group.deliveries.filter(d => d.status === 'DELIVERED').length;
+
+                  return (
+                    <div key={group.truck.id} className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden transition-all">
+                      {/* Cabeçalho do Motorista */}
+                      <div 
+                        onClick={() => setExpandedDrivers(prev => ({ ...prev, [group.truck.id]: !prev[group.truck.id] }))}
+                        className="p-4 sm:p-5 bg-gradient-to-r from-slate-50 to-white border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer hover:bg-slate-50/80 transition-colors"
+                      >
+                        <div className="flex items-start sm:items-center gap-3">
+                          <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm shadow-emerald-500/20">
+                            <TruckIcon size={18} />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="font-black text-brand-dark uppercase tracking-tight text-base sm:text-lg">
+                                {group.truck.driverName}
+                              </h3>
+                              <span className="font-mono text-xs font-bold bg-slate-200/80 text-slate-700 px-2 py-0.5 rounded-lg">
+                                {group.truck.plate}
+                              </span>
+                              <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                group.truck.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-800' :
+                                group.truck.status === 'ARRIVED' ? 'bg-emerald-100 text-emerald-800' :
+                                'bg-slate-100 text-slate-600'
+                              }`}>
+                                {group.truck.status === 'IN_ROUTE' ? 'Em Rota' : group.truck.status === 'ARRIVED' ? 'No Local' : 'Disponível'}
+                              </span>
+                            </div>
+
+                            {/* Informações de Endereço/Base e Setores atendidos */}
+                            <div className="flex items-center gap-2 flex-wrap text-xs text-slate-500 mt-1">
+                              {(group.driver?.sector || group.truck.sector) && (
+                                <span className="flex items-center gap-1 font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-200/60">
+                                  <MapPin size={11} /> Setor: {group.driver?.sector || group.truck.sector}
+                                </span>
+                              )}
+                              {group.driver?.address && (
+                                <span className="text-[11px] text-slate-500">
+                                  Base/Endereço: <strong>{group.driver.address}</strong>
+                                </span>
+                              )}
+                              {group.driver?.phone && (
+                                <span className="font-mono text-[11px] text-slate-500">
+                                  Tel: {group.driver.phone}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 self-end sm:self-auto">
+                          {/* Badges de Contagem */}
+                          <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider">
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-lg">
+                              {group.deliveries.length} Total
+                            </span>
+                            {pendingCount > 0 && (
+                              <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-lg">
+                                {pendingCount} Pendentes
+                              </span>
+                            )}
+                            {deliveredCount > 0 && (
+                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-lg">
+                                {deliveredCount} Entregues
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedDrivers(prev => ({ ...prev, [group.truck.id]: !prev[group.truck.id] }));
+                            }}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/50"
+                          >
+                            {isCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Lista de Entregas do Motorista */}
+                      {!isCollapsed && (
+                        <div>
+                          {group.deliveries.length === 0 ? (
+                            <div className="p-6 text-center text-xs text-slate-400 font-medium">
+                              Nenhuma entrega atribuída a este motorista com os filtros atuais.
+                            </div>
                           ) : (
-                            <span className="text-slate-300">—</span>
+                            <div className="divide-y divide-slate-100">
+                              {group.deliveries.map(delivery => (
+                                <div key={delivery.id} className="p-4 sm:p-5 hover:bg-slate-50/60 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                  <div className="space-y-1 min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <h4 className="font-black text-brand-dark uppercase tracking-tight text-sm">
+                                        {delivery.residentName}
+                                      </h4>
+                                      <span className="text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-md">
+                                        📍 {getDeliverySector(delivery)}
+                                      </span>
+                                      {delivery.councilman && (
+                                        <span className="text-[10px] text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200/60">
+                                          🏛️ {delivery.councilman}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-slate-600 font-medium flex items-center gap-1.5">
+                                      <MapPin size={12} className="text-slate-400 shrink-0" />
+                                      <span>{delivery.address}</span>
+                                    </p>
+                                    {delivery.referencePoint && (
+                                      <p className="text-[11px] text-slate-500 font-sans italic">
+                                        Ref: {delivery.referencePoint}
+                                      </p>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                                    {delivery.photo && (
+                                      <button 
+                                        onClick={() => setSelectedPhoto(delivery.photo!)}
+                                        className="p-2 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-600 hover:text-white transition-all active:scale-95"
+                                        title="Ver Comprovante"
+                                      >
+                                        <ImageIcon size={16} />
+                                      </button>
+                                    )}
+
+                                    <button 
+                                      onClick={() => setStatusConfirmationModal({ delivery })} 
+                                      className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider border cursor-pointer ${
+                                        delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-700 border-emerald-200' :
+                                        delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-700 border-amber-200' : 
+                                        'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      {delivery.status === 'DELIVERED' ? 'ENTREGUE' : delivery.status === 'IN_ROUTE' ? 'EM ROTA' : 'PENDENTE'}
+                                    </button>
+
+                                    <button 
+                                      onClick={() => handleDelete('deliveries', delivery.id)}
+                                      className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-colors cursor-pointer"
+                                      title="Excluir Entrega"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           )}
-                        </td>
-                        <td className="px-6 py-5 text-center">
-                           <button onClick={() => setStatusConfirmationModal({ delivery })} className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border ${
-                            delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-600 border-emerald-200' :
-                            delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-600 border-amber-200' : 'bg-slate-100 text-slate-500 border-slate-200'
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* VISUALIZAÇÃO 3: LISTA GERAL COMPLETA */}
+            {deliveryViewMode === 'ALL' && (
+              <>
+                {/* Desktop Table */}
+                <div className="hidden lg:block bg-white rounded-3xl overflow-hidden border border-slate-200 shadow-sm">
+                  <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                    <div>
+                      <h3 className="font-black text-brand-dark uppercase tracking-tight text-lg">
+                        Relação Geral de Entregas Cadastradas
+                      </h3>
+                      <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">
+                        {filteredDeliveriesForView.length} registros exibidos
+                      </p>
+                    </div>
+                  </div>
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-widest">
+                      <tr>
+                        <th className="px-6 py-4">Morador</th>
+                        <th className="px-6 py-4">Setor / Região</th>
+                        <th className="px-6 py-4">Endereço</th>
+                        <th className="px-6 py-4">Motorista / Caminhão</th>
+                        <th className="px-6 py-4">Indicação (Vereador)</th>
+                        <th className="px-6 py-4 text-center">Foto</th>
+                        <th className="px-6 py-4 text-center">Status</th>
+                        <th className="px-6 py-4 text-center">Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredDeliveriesForView.length === 0 ? (
+                        <tr><td colSpan={8} className="p-10 text-center text-slate-400">Nenhuma entrega encontrada para os filtros selecionados.</td></tr>
+                      ) : (
+                        filteredDeliveriesForView.map(delivery => {
+                          const assignedTruck = trucks.find(t => t.id === delivery.truckId);
+                          const sector = getDeliverySector(delivery);
+                          return (
+                            <tr key={delivery.id} className="hover:bg-slate-50 transition-colors">
+                              <td className="px-6 py-5 font-black text-brand-dark uppercase tracking-tight">{delivery.residentName}</td>
+                              <td className="px-6 py-5">
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200/60">
+                                  <MapPin size={11} /> {sector}
+                                </span>
+                              </td>
+                              <td className="px-6 py-5 text-sm text-slate-600">{delivery.address}</td>
+                              <td className="px-6 py-5 text-sm">
+                                {assignedTruck ? (
+                                  <div className="flex flex-col">
+                                    <span className="font-bold text-slate-800 text-xs">{assignedTruck.driverName}</span>
+                                    <span className="font-mono text-[10px] text-slate-400">{assignedTruck.plate}</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 text-xs italic">Não atribuído</span>
+                                )}
+                              </td>
+                              <td className="px-6 py-5 text-sm">
+                                {delivery.councilman ? (
+                                  <span className="font-bold text-purple-700 bg-purple-50 px-2.5 py-1 rounded-lg text-xs border border-purple-200/60 inline-flex items-center gap-1">
+                                    🏛️ {delivery.councilman}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 text-xs italic font-medium">Sem indicação</span>
+                                )}
+                              </td>
+                              <td className="px-6 py-5 text-center">
+                                {delivery.photo ? (
+                                  <button 
+                                    onClick={() => setSelectedPhoto(delivery.photo!)}
+                                    className="p-3 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-600 hover:text-white transition-all active:scale-90"
+                                    title="Ver Comprovante"
+                                  >
+                                    <ImageIcon size={20} />
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-6 py-5 text-center">
+                                <button onClick={() => setStatusConfirmationModal({ delivery })} className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border ${
+                                  delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-600 border-emerald-200' :
+                                  delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-600 border-amber-200' : 'bg-slate-100 text-slate-500 border-slate-200'
+                                }`}>
+                                  {delivery.status === 'DELIVERED' ? 'ENTREGUE' : delivery.status === 'IN_ROUTE' ? 'EM ROTA' : 'PENDENTE'}
+                                </button>
+                              </td>
+                              <td className="px-6 py-5 text-center">
+                                <button 
+                                  onClick={() => handleDelete('deliveries', delivery.id)}
+                                  className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile Cards */}
+                <div className="lg:hidden space-y-3">
+                  {filteredDeliveriesForView.map(delivery => {
+                    const assignedTruck = trucks.find(t => t.id === delivery.truckId);
+                    const sector = getDeliverySector(delivery);
+                    return (
+                      <div key={delivery.id} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <span className="text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/60">
+                                📍 {sector}
+                              </span>
+                            </div>
+                            <h3 className="font-black text-brand-dark uppercase tracking-tight leading-tight">{delivery.residentName}</h3>
+                            {delivery.councilman && (
+                              <span className="text-[10px] text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full inline-block mt-1 border border-purple-200/50">
+                                🏛️ Indicação: {delivery.councilman}
+                              </span>
+                            )}
+                          </div>
+                          <button onClick={() => setStatusConfirmationModal({ delivery })} className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter ${
+                            delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-600' :
+                            delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
                           }`}>
                             {delivery.status === 'DELIVERED' ? 'ENTREGUE' : delivery.status === 'IN_ROUTE' ? 'EM ROTA' : 'PENDENTE'}
                           </button>
-                        </td>
-                        <td className="px-6 py-5 text-center">
-                          <button 
-                            onClick={() => handleDelete('deliveries', delivery.id)}
-                            className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                        </div>
+                        <p className="text-xs text-slate-500 font-bold mb-2">{delivery.address}</p>
+                        <div className="text-[10px] text-slate-500 font-medium mb-3">
+                          Motorista: <strong className="text-slate-800">{assignedTruck ? assignedTruck.driverName : 'Não atribuído'}</strong>
+                          {assignedTruck?.plate ? ` (${assignedTruck.plate})` : ''}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <Clock size={12} /> {new Date(delivery.createdAt || '').toLocaleDateString()} • {new Date(delivery.createdAt || '').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                          {delivery.photo && (
+                            <button 
+                              onClick={() => setSelectedPhoto(delivery.photo!)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-xl text-[10px] font-black uppercase tracking-tight active:scale-95 transition-all"
+                            >
+                              <ImageIcon size={14} /> Foto
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ABASTECIMENTO & CONSUMO DE COMBUSTÍVEL POR SETOR */}
+        {activeTab === 'fuel' && (
+          <div className="p-3 sm:p-5 lg:p-6 max-w-7xl mx-auto w-full flex flex-col gap-5">
+            {/* Top Header */}
+            <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    onClick={() => setActiveTab('operational')}
+                    className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
+                    title="Voltar para o Painel Operacional"
+                    aria-label="Voltar para o Painel"
+                  >
+                    <ArrowLeft size={16} />
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="p-2 bg-amber-500/10 text-amber-600 rounded-xl border border-amber-500/20">
+                      <Fuel size={20} />
+                    </span>
+                    <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900">
+                      Abastecimento & Consumo de Combustível
+                    </h2>
+                  </div>
+                </div>
+                <p className="text-slate-500 text-xs mt-1 font-medium pl-11">
+                  Controle e auditoria do consumo médio por km rodado em cada setor de Inhapi/AL ({userRole === 'admin' ? 'Visão Administrador' : 'Visão Secretário'}).
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  onClick={handleExportFuelLogsCSV}
+                  className="flex-1 sm:flex-initial h-10 px-3.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-xs"
+                  title="Exportar registros de combustível em planilha CSV"
+                >
+                  <Download size={14} />
+                  <span>Exportar CSV</span>
+                </button>
+                <button
+                  onClick={() => handleOpenAddFuelModal()}
+                  className="flex-1 sm:flex-initial h-10 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5 shadow-md shadow-amber-600/20 transition-all active:scale-95 cursor-pointer"
+                >
+                  <Plus size={16} />
+                  <span>Novo Abastecimento</span>
+                </button>
+              </div>
+            </header>
+
+            {/* KPIs Globais da Frota de Caminhões-Pipa */}
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-2.5 sm:gap-4">
+              {/* Card 1: Litros Abastecidos */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Total Abastecido</span>
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-600 flex items-center justify-center">
+                    <Fuel size={16} />
+                  </div>
+                </div>
+                <div className="mt-2">
+                  <div className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                    {fleetFuelKPIs.totalLiters.toLocaleString('pt-BR')} <span className="text-xs font-bold text-slate-500">L</span>
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-400 mt-0.5 block">
+                    Volume acumulado na frota
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 2: KM Rodados */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">KM Percorridos</span>
+                  <div className="w-8 h-8 rounded-xl bg-blue-500/10 text-blue-600 flex items-center justify-center">
+                    <Gauge size={16} />
+                  </div>
+                </div>
+                <div className="mt-2">
+                  <div className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                    {fleetFuelKPIs.totalDistanceKm.toLocaleString('pt-BR')} <span className="text-xs font-bold text-slate-500">km</span>
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-400 mt-0.5 block">
+                    Distância entre abastecimentos
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 3: Consumo Médio da Frota (KM/L) */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Consumo Médio</span>
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center">
+                    <TrendingUp size={16} />
+                  </div>
+                </div>
+                <div className="mt-2">
+                  <div className="text-xl sm:text-2xl font-black text-emerald-700 tracking-tight">
+                    {fleetFuelKPIs.avgKmPerLiter > 0 ? `${fleetFuelKPIs.avgKmPerLiter} ` : '— '}
+                    <span className="text-xs font-bold text-slate-500">km/L</span>
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-400 mt-0.5 block">
+                    {fleetFuelKPIs.avgLitersPerKm > 0 ? `${fleetFuelKPIs.avgLitersPerKm} litros por km` : 'Aguardando dados'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 4: Gasto Total com Combustível */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Gasto Total</span>
+                  <div className="w-8 h-8 rounded-xl bg-purple-500/10 text-purple-600 flex items-center justify-center">
+                    <DollarSign size={16} />
+                  </div>
+                </div>
+                <div className="mt-2">
+                  <div className="text-lg sm:text-xl font-black text-slate-900 tracking-tight">
+                    {fleetFuelKPIs.totalCost > 0 ? fleetFuelKPIs.totalCost.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : 'R$ 0,00'}
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-400 mt-0.5 block">
+                    {fleetFuelKPIs.avgCostPerKm > 0 ? `Média: R$ ${fleetFuelKPIs.avgCostPerKm.toFixed(2)} / km` : 'Custo do diesel'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 5: Setores Atendidos e Eficiência */}
+              <div className="col-span-2 lg:col-span-1 bg-gradient-to-br from-amber-50 to-orange-50/60 p-3.5 sm:p-4 rounded-2xl border border-amber-200/80 shadow-xs flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-800">Setores c/ Dados</span>
+                  <span className="text-[10px] font-bold bg-amber-200/70 text-amber-900 px-2 py-0.5 rounded-full">
+                    {sectorConsumptionStats.length} Setores
+                  </span>
+                </div>
+                <div className="mt-2">
+                  <div className="text-xl sm:text-2xl font-black text-amber-950 tracking-tight">
+                    {fuelLogs.length} <span className="text-xs font-bold text-amber-700">abastecimentos</span>
+                  </div>
+                  <span className="text-[10px] font-semibold text-amber-800 mt-0.5 block">
+                    Frota auditada em tempo real
+                  </span>
+                </div>
+              </div>
             </div>
 
-            {/* Mobile Cards */}
-            <div className="lg:hidden space-y-3">
-              {deliveries.map(delivery => (
-                <div key={delivery.id} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <h3 className="font-black text-brand-dark uppercase tracking-tight leading-tight">{delivery.residentName}</h3>
-                      {delivery.councilman && (
-                        <span className="text-[10px] text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded-full inline-block mt-1 border border-purple-200/50">
-                          🏛️ Indicação: {delivery.councilman}
-                        </span>
-                      )}
-                    </div>
-                    <button onClick={() => setStatusConfirmationModal({ delivery })} className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter ${
-                      delivery.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-600' :
-                      delivery.status === 'IN_ROUTE' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
-                    }`}>
-                      {delivery.status === 'DELIVERED' ? 'ENTREGUE' : delivery.status === 'IN_ROUTE' ? 'EM ROTA' : 'PENDENTE'}
-                    </button>
+            {/* SEÇÃO 1: CONTROLE DE CONSUMO MÉDIO POR KM PERCORRIDO EM CADA SETOR */}
+            <div className="bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-slate-100">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 uppercase tracking-tight">
+                      Consumo Médio por KM Percorrido em Cada Setor
+                    </h3>
                   </div>
-                  <p className="text-xs text-slate-500 font-bold mb-3">{delivery.address}</p>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                      <Clock size={12} /> {new Date(delivery.createdAt || '').toLocaleDateString()} • {new Date(delivery.createdAt || '').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </div>
-                    {delivery.photo && (
-                      <button 
-                        onClick={() => setSelectedPhoto(delivery.photo!)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-xl text-[10px] font-black uppercase tracking-tight active:scale-95 transition-all"
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    Acompanhamento setorizado do rendimento da frota. Detecta trechos com maior consumo de diesel devido a relevo e estradas vicinais.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider">
+                  <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200">
+                    🟢 Ótimo (&ge; 2.8 km/L)
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-1 rounded-md border border-amber-200">
+                    🟡 Normal (2.2 - 2.8)
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-rose-700 bg-rose-50 px-2 py-1 rounded-md border border-rose-200">
+                    🔴 Atenção (&lt; 2.2)
+                  </span>
+                </div>
+              </div>
+
+              {/* Grid de Cards dos Setores */}
+              {sectorConsumptionStats.length === 0 ? (
+                <div className="p-8 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200 flex flex-col items-center justify-center gap-2">
+                  <Fuel size={36} className="text-amber-400/80 stroke-[1.5]" />
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                    Nenhum abastecimento registrado até o momento
+                  </p>
+                  <p className="text-[11px] text-slate-400 max-w-sm">
+                    Clique no botão acima para registrar o primeiro abastecimento com odômetro e litros para que o sistema calcule automaticamente o consumo por setor.
+                  </p>
+                  <button
+                    onClick={() => handleOpenAddFuelModal()}
+                    className="mt-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all cursor-pointer shadow-sm"
+                  >
+                    + Registrar Primeiro Abastecimento
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {sectorConsumptionStats.map((item) => {
+                    const isGood = item.efficiency === 'EXCELLENT';
+                    const isWarning = item.efficiency === 'WARNING';
+                    return (
+                      <div
+                        key={item.sector}
+                        className={`rounded-2xl p-4 border transition-all hover:shadow-md ${
+                          isGood 
+                            ? 'bg-emerald-50/30 border-emerald-200/80 hover:border-emerald-300' 
+                            : isWarning 
+                              ? 'bg-rose-50/30 border-rose-200/80 hover:border-rose-300'
+                              : 'bg-slate-50/50 border-slate-200 hover:border-slate-300'
+                        }`}
                       >
-                        <ImageIcon size={14} /> Foto
+                        {/* Top Setor e Badge */}
+                        <div className="flex items-start justify-between gap-2 mb-3">
+                          <div className="min-w-0">
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">
+                              Setor / Região
+                            </span>
+                            <h4 className="font-black text-sm text-slate-900 uppercase tracking-tight truncate" title={item.sector}>
+                              {item.sector}
+                            </h4>
+                          </div>
+                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full shrink-0 border ${
+                            isGood 
+                              ? 'bg-emerald-100 text-emerald-800 border-emerald-300' 
+                              : isWarning 
+                                ? 'bg-rose-100 text-rose-800 border-rose-300' 
+                                : 'bg-amber-100 text-amber-800 border-amber-300'
+                          }`}>
+                            {isGood ? '🟢 Ótimo' : isWarning ? '🔴 Alto Consumo' : '🟡 Moderado'}
+                          </span>
+                        </div>
+
+                        {/* Métrica Principal: Consumo Médio KM/L */}
+                        <div className="bg-white rounded-xl p-3 border border-slate-200/80 shadow-xs mb-3">
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                              Consumo Médio
+                            </span>
+                            <span className="font-mono text-[10px] text-slate-400">
+                              {item.avgLitersPerKm > 0 ? `${item.avgLitersPerKm} L / km` : ''}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-1 mt-1">
+                            <span className={`text-2xl font-black tracking-tight ${
+                              isGood ? 'text-emerald-600' : isWarning ? 'text-rose-600' : 'text-slate-800'
+                            }`}>
+                              {item.avgKmPerLiter > 0 ? item.avgKmPerLiter : '0.00'}
+                            </span>
+                            <span className="text-xs font-bold text-slate-400">km por litro</span>
+                          </div>
+
+                          {/* Barra de rendimento proporcional (base 4.0 km/l) */}
+                          <div className="w-full bg-slate-100 h-1.5 rounded-full mt-2 overflow-hidden">
+                            <div 
+                              className={`h-full rounded-full transition-all ${
+                                isGood ? 'bg-emerald-500' : isWarning ? 'bg-rose-500' : 'bg-amber-500'
+                              }`}
+                              style={{ width: `${Math.min(100, (item.avgKmPerLiter / 4.0) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Dados Detalhados do Setor */}
+                        <div className="grid grid-cols-2 gap-2 text-[11px] mb-3">
+                          <div className="bg-white/80 p-2 rounded-lg border border-slate-100">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">KM Rodados</span>
+                            <strong className="font-black text-slate-800 font-mono text-xs">
+                              {item.totalDistanceKm.toLocaleString('pt-BR')} km
+                            </strong>
+                          </div>
+                          <div className="bg-white/80 p-2 rounded-lg border border-slate-100">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Combustível</span>
+                            <strong className="font-black text-slate-800 font-mono text-xs">
+                              {Math.round(item.totalLiters).toLocaleString('pt-BR')} L
+                            </strong>
+                          </div>
+                          <div className="bg-white/80 p-2 rounded-lg border border-slate-100">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Custo Total</span>
+                            <strong className="font-black text-slate-800 font-mono text-xs">
+                              R$ {item.totalCost.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                            </strong>
+                          </div>
+                          <div className="bg-white/80 p-2 rounded-lg border border-slate-100">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Custo por KM</span>
+                            <strong className="font-black text-slate-800 font-mono text-xs">
+                              {item.avgCostPerKm > 0 ? `R$ ${item.avgCostPerKm.toFixed(2)}/km` : '—'}
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Caminhões e Ação Rápida de Filtro */}
+                        <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-[10px]">
+                          <div className="truncate mr-2 text-slate-500">
+                            <span className="font-bold">Caminhões: </span>
+                            {item.trucksList.length > 0 ? item.trucksList.join(', ') : 'N/D'}
+                          </div>
+                          <button
+                            onClick={() => {
+                              setFuelSectorFilter(item.sector);
+                              const el = document.getElementById('fuel-history-section');
+                              if (el) el.scrollIntoView({ behavior: 'smooth' });
+                            }}
+                            className="text-amber-700 hover:text-amber-800 font-bold underline whitespace-nowrap cursor-pointer shrink-0"
+                          >
+                            Ver {item.logCount} registros &darr;
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* SEÇÃO 2: HISTÓRICO COMPLETO DE ABASTECIMENTOS COM FILTROS */}
+            <div id="fuel-history-section" className="bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="text-base sm:text-lg font-black text-slate-900 uppercase tracking-tight">
+                    Histórico de Abastecimentos dos Caminhões
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    {filteredFuelLogs.length} abastecimentos encontrados com base nos filtros atuais
+                  </p>
+                </div>
+
+                {/* Filtro de Período Rápido */}
+                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                  {[
+                    { id: 'ALL', label: 'Todos' },
+                    { id: 'TODAY', label: 'Hoje' },
+                    { id: 'WEEK', label: '7 Dias' },
+                    { id: 'MONTH', label: '30 Dias' },
+                  ].map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => setFuelPeriodFilter(p.id as any)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        fuelPeriodFilter === p.id
+                          ? 'bg-amber-600 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Barra de Filtros: Setor, Caminhão e Campo de Busca */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* Filtro de Setor */}
+                <div>
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-wider block mb-1 pl-1">
+                    Filtrar por Setor
+                  </label>
+                  <select
+                    value={fuelSectorFilter}
+                    onChange={(e) => setFuelSectorFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                  >
+                    <option value="ALL">📍 Todos os Setores</option>
+                    {sectorsList.map((sec) => (
+                      <option key={sec} value={sec}>
+                        📍 {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Filtro de Caminhão */}
+                <div>
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-wider block mb-1 pl-1">
+                    Filtrar por Caminhão / Placa
+                  </label>
+                  <select
+                    value={fuelTruckFilter}
+                    onChange={(e) => setFuelTruckFilter(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                  >
+                    <option value="ALL">🚛 Todos os Caminhões-Pipa</option>
+                    {trucks.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        🚛 {t.driverName} ({t.plate})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Campo de Busca Livre */}
+                <div>
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-wider block mb-1 pl-1">
+                    Buscar Texto
+                  </label>
+                  <div className="relative">
+                    <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Placa, motorista, posto, nota..."
+                      value={fuelSearch}
+                      onChange={(e) => setFuelSearch(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-8 py-2 text-xs font-medium text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                    {fuelSearch && (
+                      <button
+                        onClick={() => setFuelSearch('')}
+                        className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600"
+                      >
+                        <X size={14} />
                       </button>
                     )}
                   </div>
                 </div>
-              ))}
+              </div>
+
+              {/* Tabela de Abastecimentos (Desktop) */}
+              <div className="hidden lg:block overflow-x-auto border border-slate-200 rounded-2xl">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-bold text-[10px]">
+                    <tr>
+                      <th className="px-4 py-3">Data / Hora</th>
+                      <th className="px-4 py-3">Caminhão & Motorista</th>
+                      <th className="px-4 py-3">Setor Atendido</th>
+                      <th className="px-4 py-3">Combustível</th>
+                      <th className="px-4 py-3 text-right">Litros</th>
+                      <th className="px-4 py-3 text-right">Odômetro (KM)</th>
+                      <th className="px-4 py-3 text-center">Consumo Médio</th>
+                      <th className="px-4 py-3 text-right">Total (R$)</th>
+                      <th className="px-4 py-3">Posto / Nota</th>
+                      <th className="px-4 py-3 text-center">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredFuelLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
+                          Nenhum abastecimento encontrado para os filtros selecionados.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredFuelLogs.map((log) => {
+                        return (
+                          <tr key={log.id} className="hover:bg-slate-50/70 transition-colors">
+                            <td className="px-4 py-3 font-mono text-[11px] whitespace-nowrap text-slate-600">
+                              {log.date ? new Date(log.date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-black text-slate-900 uppercase">
+                                {log.driverName || 'Motorista Não Identificado'}
+                              </div>
+                              <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 uppercase font-bold">
+                                {log.plate}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-bold text-slate-800">
+                              <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-900 border border-amber-200/80 px-2 py-0.5 rounded-lg text-[10px] uppercase">
+                                📍 {log.sector || 'Centro'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 font-medium text-slate-600">
+                              <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
+                                {log.fuelType === 'DIESEL_S10' ? 'Diesel S-10' :
+                                 log.fuelType === 'DIESEL_COMUM' ? 'Diesel Comum' :
+                                 log.fuelType === 'GASOLINA' ? 'Gasolina' : 'Arla 32'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right font-black font-mono text-slate-900 text-sm whitespace-nowrap">
+                              {Number(log.liters).toLocaleString('pt-BR')} L
+                            </td>
+                            <td className="px-4 py-3 text-right whitespace-nowrap font-mono text-[11px]">
+                              <div className="font-bold text-slate-800">{log.currentKm.toLocaleString('pt-BR')} km</div>
+                              {log.previousKm !== undefined && (
+                                <span className="text-[9px] text-slate-400 block">
+                                  +{(log.distanceKm || 0).toLocaleString('pt-BR')} km rodados
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-center whitespace-nowrap">
+                              {log.kmPerLiter > 0 ? (
+                                <div className="inline-flex flex-col items-center">
+                                  <span className={`px-2 py-0.5 rounded-lg font-black font-mono text-xs ${
+                                    log.kmPerLiter >= 2.8 
+                                      ? 'bg-emerald-100 text-emerald-800' 
+                                      : log.kmPerLiter < 2.2 
+                                        ? 'bg-rose-100 text-rose-800' 
+                                        : 'bg-amber-100 text-amber-800'
+                                  }`}>
+                                    {log.kmPerLiter.toFixed(2)} km/L
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 font-mono mt-0.5">
+                                    {(log.litersPerKm || 0).toFixed(3)} L/km
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 text-xs">—</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono whitespace-nowrap">
+                              <div className="font-black text-slate-900">
+                                {log.totalCost ? log.totalCost.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '—'}
+                              </div>
+                              {log.pricePerLiter ? (
+                                <span className="text-[9px] text-slate-400 block">
+                                  R$ {log.pricePerLiter.toFixed(2)}/L
+                                </span>
+                              ) : null}
+                            </td>
+                            <td className="px-4 py-3 text-slate-600 text-[11px] max-w-[140px] truncate" title={`${log.gasStation || ''} ${log.invoiceNumber ? `NF: ${log.invoiceNumber}` : ''}`}>
+                              <span className="font-semibold block truncate">{log.gasStation || '—'}</span>
+                              {log.invoiceNumber && (
+                                <span className="text-[9px] text-slate-400 font-mono">
+                                  NF: {log.invoiceNumber}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-center whitespace-nowrap">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  onClick={() => handleOpenEditFuelModal(log)}
+                                  className="p-1.5 bg-slate-100 hover:bg-amber-50 hover:text-amber-700 text-slate-600 rounded-lg transition-colors cursor-pointer"
+                                  title="Editar abastecimento"
+                                >
+                                  <Edit2 size={13} />
+                                </button>
+                                <button
+                                  onClick={() => setFuelDeleteConfirm(log)}
+                                  className="p-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-500 rounded-lg transition-colors cursor-pointer"
+                                  title="Excluir registro"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Cards de Abastecimentos (Mobile) */}
+              <div className="lg:hidden space-y-2.5">
+                {filteredFuelLogs.length === 0 ? (
+                  <p className="text-center py-6 text-slate-400 text-xs font-bold uppercase tracking-wider">
+                    Nenhum abastecimento encontrado para este filtro.
+                  </p>
+                ) : (
+                  filteredFuelLogs.map((log) => (
+                    <div key={log.id} className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-black text-xs text-slate-900 uppercase">
+                              {log.driverName}
+                            </span>
+                            <span className="font-mono text-[9px] bg-slate-200 px-1.5 py-0.2 rounded font-bold uppercase">
+                              {log.plate}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-medium block mt-0.5">
+                            {log.date ? new Date(log.date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </span>
+                        </div>
+                        <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-200">
+                          📍 {log.sector || 'Centro'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 bg-white p-2.5 rounded-xl border border-slate-100 text-[10px]">
+                        <div>
+                          <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Abastecido</span>
+                          <strong className="font-mono font-black text-xs text-slate-800">
+                            {log.liters} L
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Percorrido</span>
+                          <strong className="font-mono font-black text-xs text-slate-800">
+                            {log.distanceKm} km
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-[8px] font-bold text-slate-400 uppercase tracking-wider block">Consumo</span>
+                          <strong className={`font-mono font-black text-xs ${
+                            log.kmPerLiter >= 2.8 ? 'text-emerald-600' : log.kmPerLiter < 2.2 ? 'text-rose-600' : 'text-amber-700'
+                          }`}>
+                            {log.kmPerLiter > 0 ? `${log.kmPerLiter.toFixed(2)} km/L` : '—'}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-[10px]">
+                        <span className="font-mono font-bold text-slate-700">
+                          {log.totalCost ? log.totalCost.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : ''}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleOpenEditFuelModal(log)}
+                            className="px-2.5 py-1 bg-white border border-slate-200 text-slate-700 rounded-lg font-bold text-[10px] uppercase flex items-center gap-1 shadow-2xs"
+                          >
+                            <Edit2 size={11} /> Editar
+                          </button>
+                          <button
+                            onClick={() => setFuelDeleteConfirm(log)}
+                            className="p-1 bg-white border border-slate-200 text-rose-600 rounded-lg"
+                            title="Excluir"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -2378,11 +5193,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <div className="flex items-center gap-2.5 mb-1">
                   <button
                     onClick={() => setActiveTab('map')}
-                    className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                    className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                     title="Voltar para o Painel"
+                    aria-label="Voltar para o Painel"
                   >
-                    <ArrowLeft size={14} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={16} />
                   </button>
                   <h2 className="text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-tight text-slate-900">Abastecimentos</h2>
                 </div>
@@ -2460,11 +5275,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             <header className="mb-4 lg:mb-6 flex items-center gap-2.5">
               <button
                 onClick={() => setActiveTab('map')}
-                className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                 title="Voltar para o Painel"
+                aria-label="Voltar para o Painel"
               >
-                <ArrowLeft size={14} />
-                <span>Voltar</span>
+                <ArrowLeft size={16} />
               </button>
               <h2 className="text-xl sm:text-2xl lg:text-3xl font-black uppercase tracking-tight text-slate-900">Cadastros</h2>
             </header>
@@ -2493,12 +5308,15 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
             <div className="bg-white p-3 md:p-5 rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                 {activeCadastroSubTab === 'resident' && (
                   <div className="w-full">
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-5">
-                      <h3 className="font-bold text-lg">Moradores</h3>
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+                      <div>
+                        <h3 className="font-bold text-lg text-slate-900">Moradores, Escolas e Creches</h3>
+                        <p className="text-xs text-slate-500 font-medium">Cadastros de beneficiários e pontos de entrega de água</p>
+                      </div>
                       <div className="flex flex-col sm:flex-row w-full sm:w-auto items-stretch sm:items-center gap-2">
                         <input 
                           type="text" 
-                          placeholder="Buscar por nome ou endereço..." 
+                          placeholder="Buscar nome, sítio ou endereço..." 
                           value={residentSearch} 
                           onChange={(e) => setResidentSearch(e.target.value)} 
                           className="bg-slate-100 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm w-full sm:w-[220px] outline-none" 
@@ -2506,9 +5324,49 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                         <div className="grid grid-cols-3 sm:flex gap-2 w-full sm:w-auto">
                           <button onClick={handleExportResidentsCSV} className="bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 px-2.5 sm:px-3 py-2.5 rounded-xl text-[11px] sm:text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1"><Download size={13} className="shrink-0" /> <span className="truncate">CSV</span></button>
                           <button onClick={() => handleDeleteAll('residents', residents)} className="bg-red-100 text-red-600 px-2.5 sm:px-3 py-2.5 rounded-xl text-[11px] sm:text-xs font-bold uppercase tracking-wide flex items-center justify-center"><span className="truncate">Limpar</span></button>
-                          <button onClick={() => setShowAddResident(true)} className="bg-brand-dark text-white px-2.5 sm:px-3 py-2.5 rounded-xl text-[11px] sm:text-xs font-bold uppercase tracking-wide flex items-center justify-center"><span className="truncate">+ Novo</span></button>
+                          <button 
+                            onClick={() => {
+                              setResidentFormError('');
+                              setNewResident({
+                                name: '',
+                                address: '',
+                                neighborhood: '',
+                                phone: '',
+                                referencePoint: '',
+                                councilman: '',
+                                category: residentCategoryFilter === 'ALL' ? 'RESIDENT' : residentCategoryFilter
+                              });
+                              setShowAddResident(true);
+                            }} 
+                            className="bg-brand-dark hover:bg-slate-800 text-white px-3 sm:px-3.5 py-2.5 rounded-xl text-[11px] sm:text-xs font-bold uppercase tracking-wide flex items-center justify-center gap-1 shadow-sm active:scale-95 transition-all cursor-pointer"
+                          >
+                            <Plus size={13} />
+                            <span className="truncate">+ Cadastrar</span>
+                          </button>
                         </div>
                       </div>
+                    </div>
+
+                    {/* Category Filter Tabs */}
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-2 mb-3 custom-scrollbar">
+                      {[
+                        { id: 'ALL', label: `Todos (${residents.length})` },
+                        { id: 'RESIDENT', label: `🏠 Moradores (${residents.filter(r => !r.category || r.category === 'RESIDENT').length})` },
+                        { id: 'SCHOOL', label: `🏫 Escolas (${residents.filter(r => r.category === 'SCHOOL').length})` },
+                        { id: 'DAYCARE', label: `👶 Creches (${residents.filter(r => r.category === 'DAYCARE').length})` },
+                      ].map(tab => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setResidentCategoryFilter(tab.id as any)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
+                            residentCategoryFilter === tab.id
+                              ? 'bg-blue-600 text-white shadow-xs'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
                     </div>
                     
                     {/* Desktop Table */}
@@ -2516,18 +5374,48 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                       <table className="w-full text-left min-w-[700px]">
                           <thead className="bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                             <tr>
-                              <th className="px-3.5 py-1.5">Nome</th>
-                              <th className="px-3.5 py-1.5">Endereço</th>
-                              <th className="px-3.5 py-1.5">Bairro/Sítio</th>
-                              <th className="px-3.5 py-1.5">Telefone</th>
-                              <th className="px-3.5 py-1.5">Ref.</th>
-                              <th className="px-3.5 py-1.5 text-center">Ações</th>
+                              <th className="px-3.5 py-2">Categoria</th>
+                              <th className="px-3.5 py-2">Nome</th>
+                              <th className="px-3.5 py-2">Endereço / Sítio</th>
+                              <th className="px-3.5 py-2">Notificação Secretário (Motorista Indicado)</th>
+                              <th className="px-3.5 py-2">Telefone</th>
+                              <th className="px-3.5 py-2">Ref.</th>
+                              <th className="px-3.5 py-2 text-center">Ações</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
-                            {residents.filter(r => r.name.toLowerCase().includes(residentSearch.toLowerCase()) || r.address.toLowerCase().includes(residentSearch.toLowerCase())).map(resident => (
+                            {residents
+                              .filter(r => {
+                                if (residentCategoryFilter === 'SCHOOL' && r.category !== 'SCHOOL') return false;
+                                if (residentCategoryFilter === 'DAYCARE' && r.category !== 'DAYCARE') return false;
+                                if (residentCategoryFilter === 'RESIDENT' && r.category && r.category !== 'RESIDENT') return false;
+                                if (residentSearch.trim()) {
+                                  const q = residentSearch.toLowerCase().trim();
+                                  return (r.name || '').toLowerCase().includes(q) || 
+                                         (r.address || '').toLowerCase().includes(q) || 
+                                         (r.neighborhood || '').toLowerCase().includes(q) ||
+                                         (r.referencePoint || '').toLowerCase().includes(q);
+                                }
+                                return true;
+                              })
+                              .map(resident => (
                               <tr key={resident.id} className="hover:bg-slate-50/50">
-                                <td className="px-3.5 py-1.5 font-extrabold text-xs text-brand-dark uppercase tracking-tight">
+                                <td className="px-3.5 py-2">
+                                  {resident.category === 'SCHOOL' ? (
+                                    <span className="inline-flex items-center gap-1 text-[9px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-md">
+                                      <School size={11} /> ESCOLA
+                                    </span>
+                                  ) : resident.category === 'DAYCARE' ? (
+                                    <span className="inline-flex items-center gap-1 text-[9px] font-black text-pink-700 bg-pink-50 border border-pink-200 px-2 py-0.5 rounded-md">
+                                      <Baby size={11} /> CRECHE
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[9px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-2 py-0.5 rounded-md">
+                                      <Home size={11} /> MORADOR
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3.5 py-2 font-extrabold text-xs text-brand-dark uppercase tracking-tight">
                                   {resident.name}
                                   {resident.councilman && (
                                     <span className="inline-block ml-1.5 text-[8px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.2 rounded w-fit">
@@ -2535,20 +5423,48 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                                     </span>
                                   )}
                                 </td>
-                                <td className="px-3.5 py-1.5 text-[11px] font-medium text-slate-600">{resident.address}</td>
-                                <td className="px-3.5 py-1.5 text-[11px] text-slate-500 font-bold uppercase tracking-wider">{resident.neighborhood}</td>
-                                <td className="px-3.5 py-1.5 text-[11px] font-mono">{resident.phone || '-'}</td>
-                                <td className="px-3.5 py-1.5 text-[11px] text-slate-500 font-medium">{resident.referencePoint || '-'}</td>
-                                <td className="px-3.5 py-1.5 text-center flex items-center justify-center gap-1.5">
+                                <td className="px-3.5 py-2 text-[11px] font-medium text-slate-600">
+                                  {resident.address}
+                                  {resident.neighborhood && resident.neighborhood !== resident.address && (
+                                    <span className="block text-[10px] text-slate-400 font-bold uppercase">{resident.neighborhood}</span>
+                                  )}
+                                </td>
+                                <td className="px-3.5 py-2">
+                                  {(() => {
+                                    const match = getResidentSectorAndDriver(resident);
+                                    if (match.driverName) {
+                                      return (
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="inline-flex items-center gap-1 text-[10px] font-black text-amber-900 bg-amber-50 border border-amber-300 px-2 py-0.5 rounded-lg w-fit shadow-2xs">
+                                            <Bell size={10} className="text-amber-600 shrink-0" />
+                                            <span>{match.driverName}</span>
+                                            {match.plate && <span className="text-[9px] font-mono text-slate-500">({match.plate})</span>}
+                                          </span>
+                                          <span className="text-[9px] text-slate-500 font-medium">
+                                            {match.reasonText}
+                                          </span>
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <span className="text-[9px] text-slate-400 italic">
+                                        Sem motorista fixado
+                                      </span>
+                                    );
+                                  })()}
+                                </td>
+                                <td className="px-3.5 py-2 text-[11px] font-mono">{resident.phone || '-'}</td>
+                                <td className="px-3.5 py-2 text-[11px] text-slate-500 font-medium">{resident.referencePoint || '-'}</td>
+                                <td className="px-3.5 py-2 text-center flex items-center justify-center gap-1.5">
                                   <button 
                                     onClick={() => handleQuickDispatchForResident(resident)} 
-                                    className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1 active:scale-95 transition-all"
-                                    title="Despachar entrega para este morador"
+                                    className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1 active:scale-95 transition-all cursor-pointer shadow-xs"
+                                    title="Despachar entrega de água"
                                   >
                                     <TruckIcon size={12}/> Despachar
                                   </button>
-                                  <button onClick={() => handleEdit('residents', resident)} className="p-1.5 bg-slate-100 text-slate-500 hover:bg-brand-primary hover:text-white rounded-lg transition-colors" title="Editar"><Edit2 size={13}/></button>
-                                  <button onClick={() => handleDelete('residents', resident.id)} className="p-1.5 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors" title="Excluir"><Trash2 size={13}/></button>
+                                  <button onClick={() => handleEdit('residents', resident)} className="p-1.5 bg-slate-100 text-slate-500 hover:bg-brand-primary hover:text-white rounded-lg transition-colors cursor-pointer" title="Editar"><Edit2 size={13}/></button>
+                                  <button onClick={() => handleDelete('residents', resident.id)} className="p-1.5 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors cursor-pointer" title="Excluir"><Trash2 size={13}/></button>
                                 </td>
                               </tr>
                             ))}
@@ -2559,11 +5475,38 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                     {/* Mobile cards for Residents */}
                     <div className="sm:hidden space-y-2">
                       {residents
-                        .filter(r => r.name.toLowerCase().includes(residentSearch.toLowerCase()) || r.address.toLowerCase().includes(residentSearch.toLowerCase()))
+                        .filter(r => {
+                          if (residentCategoryFilter === 'SCHOOL' && r.category !== 'SCHOOL') return false;
+                          if (residentCategoryFilter === 'DAYCARE' && r.category !== 'DAYCARE') return false;
+                          if (residentCategoryFilter === 'RESIDENT' && r.category && r.category !== 'RESIDENT') return false;
+                          if (residentSearch.trim()) {
+                            const q = residentSearch.toLowerCase().trim();
+                            return (r.name || '').toLowerCase().includes(q) || 
+                                   (r.address || '').toLowerCase().includes(q) || 
+                                   (r.neighborhood || '').toLowerCase().includes(q) ||
+                                   (r.referencePoint || '').toLowerCase().includes(q);
+                          }
+                          return true;
+                        })
                         .map(resident => (
                           <div key={resident.id} className="bg-slate-50/50 p-2.5 rounded-xl border border-slate-200 shadow-xs flex flex-col gap-1.5">
                             <div className="flex justify-between items-center">
                               <div className="min-w-0 flex-1 pr-2">
+                                <div className="flex items-center gap-1.5 mb-0.5">
+                                  {resident.category === 'SCHOOL' ? (
+                                    <span className="inline-flex items-center gap-0.5 text-[8px] font-black text-indigo-700 bg-indigo-100/70 border border-indigo-200 px-1.5 py-0.2 rounded">
+                                      <School size={9} /> ESCOLA
+                                    </span>
+                                  ) : resident.category === 'DAYCARE' ? (
+                                    <span className="inline-flex items-center gap-0.5 text-[8px] font-black text-pink-700 bg-pink-100/70 border border-pink-200 px-1.5 py-0.2 rounded">
+                                      <Baby size={9} /> CRECHE
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-0.5 text-[8px] font-black text-emerald-700 bg-emerald-100/70 border border-emerald-200/60 px-1.5 py-0.2 rounded">
+                                      <Home size={9} /> MORADOR
+                                    </span>
+                                  )}
+                                </div>
                                 <h4 className="font-extrabold text-xs text-brand-dark uppercase tracking-tight leading-tight truncate">{resident.name}</h4>
                                 <div className="flex flex-wrap items-center gap-1 mt-0.5">
                                   <span className="inline-block text-[7px] font-black uppercase tracking-widest bg-brand-primary/10 text-brand-dark px-1.5 py-0.2 rounded-full">
@@ -2612,17 +5555,52 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                                 </p>
                               )}
 
+                              {/* Notificação para o Secretário de qual motorista selecionar */}
+                              {(() => {
+                                const match = getResidentSectorAndDriver(resident);
+                                return (
+                                  <div className={`p-2 rounded-xl border text-[10px] flex items-start gap-1.5 my-1 ${
+                                    match.driverName ? 'bg-amber-50/90 border-amber-200/80 text-amber-950' : 'bg-slate-50 border-slate-200 text-slate-500'
+                                  }`}>
+                                    <Bell size={12} className={match.driverName ? "text-amber-600 shrink-0 mt-0.5" : "text-slate-400 shrink-0 mt-0.5"} />
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center justify-between gap-1">
+                                        <span className="font-black text-[9px] uppercase tracking-wide">
+                                          {match.driverName ? `Notificação Secretário: ${match.driverName}` : 'Sem Motorista Fixo'}
+                                        </span>
+                                        {match.plate && <span className="font-mono text-[8px] text-slate-600">[{match.plate}]</span>}
+                                      </div>
+                                      <p className="text-[8px] text-slate-500 font-medium mt-0.5 leading-tight">
+                                        {match.reasonText}
+                                      </p>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
                               <button 
                                 onClick={() => handleQuickDispatchForResident(resident)} 
-                                className="w-full mt-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-[10px] uppercase tracking-wider rounded-lg flex items-center justify-center gap-1 active:scale-95 shadow-sm shadow-blue-500/10 transition-all"
+                                className="w-full mt-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-[10px] uppercase tracking-wider rounded-lg flex items-center justify-center gap-1 active:scale-95 shadow-sm shadow-blue-500/10 transition-all cursor-pointer"
                               >
                                 <TruckIcon size={12} /> Despachar Água
                               </button>
                             </div>
                           </div>
                       ))}
-                      {residents.filter(r => r.name.toLowerCase().includes(residentSearch.toLowerCase()) || r.address.toLowerCase().includes(residentSearch.toLowerCase())).length === 0 && (
-                        <p className="text-center py-6 text-slate-400 text-xs">Nenhum morador encontrado.</p>
+                      {residents.filter(r => {
+                        if (residentCategoryFilter === 'SCHOOL' && r.category !== 'SCHOOL') return false;
+                        if (residentCategoryFilter === 'DAYCARE' && r.category !== 'DAYCARE') return false;
+                        if (residentCategoryFilter === 'RESIDENT' && r.category && r.category !== 'RESIDENT') return false;
+                        if (residentSearch.trim()) {
+                          const q = residentSearch.toLowerCase().trim();
+                          return (r.name || '').toLowerCase().includes(q) || 
+                                 (r.address || '').toLowerCase().includes(q) || 
+                                 (r.neighborhood || '').toLowerCase().includes(q) ||
+                                 (r.referencePoint || '').toLowerCase().includes(q);
+                        }
+                        return true;
+                      }).length === 0 && (
+                        <p className="text-center py-6 text-slate-400 text-xs">Nenhum registro encontrado nesta categoria.</p>
                       )}
                     </div>
                   </div>
@@ -2709,63 +5687,139 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                     
                     {/* Desktop Table */}
                     <div className="overflow-x-auto w-full custom-scrollbar hidden sm:block">
-                      <table className="w-full text-left min-w-[500px]">
+                      <table className="w-full text-left min-w-[750px]">
                         <thead className="bg-slate-50 text-xs font-bold text-slate-400 uppercase tracking-widest">
                           <tr>
                             <th className="px-6 py-4">Nome</th>
                             <th className="px-6 py-4">Telefone</th>
+                            <th className="px-6 py-4">Sítio onde Mora (GPS)</th>
+                            <th className="px-6 py-4">Setor / Região Atendida</th>
+                            <th className="px-6 py-4">Endereço / Base</th>
+                            <th className="px-6 py-4">Caminhão Vinculado</th>
                             <th className="px-6 py-4 text-center">Ações</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {drivers.map(driver => (
-                            <tr key={driver.id}>
-                              <td className="px-6 py-5 font-black">{driver.name}</td>
-                              <td className="px-6 py-5 font-mono">{driver.phone}</td>
-                              <td className="px-6 py-5 text-center flex items-center justify-center gap-2">
-                                  <button onClick={() => handleEdit('drivers', driver)} className="p-2 bg-slate-100 text-slate-500 hover:bg-brand-primary hover:text-white rounded-lg transition-colors"><Edit2 size={16}/></button>
-                                  <button onClick={() => handleDelete('drivers', driver.id)} className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors"><Trash2 size={16}/></button>
-                              </td>
-                            </tr>
-                          ))}
+                          {drivers.map(driver => {
+                            const linkedTruck = trucks.find(t => t.driverName.toLowerCase() === driver.name.toLowerCase());
+                            return (
+                              <tr key={driver.id}>
+                                <td className="px-6 py-5 font-black text-slate-900">{driver.name}</td>
+                                <td className="px-6 py-5 font-mono text-xs">{driver.phone || '—'}</td>
+                                <td className="px-6 py-5 text-xs">
+                                  {driver.homeSitio ? (
+                                    <div className="flex flex-col gap-0.5">
+                                      <span className="font-bold text-slate-900 flex items-center gap-1">
+                                        🏡 {driver.homeSitio}
+                                      </span>
+                                      {driver.homeLat && driver.homeLng ? (
+                                        <span className="text-[10px] text-emerald-700 font-mono flex items-center gap-1 bg-emerald-50 border border-emerald-200/60 px-1.5 py-0.5 rounded-md w-fit">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                          GPS Mapeado
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] text-amber-600 font-medium">Sem coordenadas</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-400 italic">Não informado</span>
+                                  )}
+                                </td>
+                                <td className="px-6 py-5 text-xs">
+                                  {driver.sector ? (
+                                    <span className="inline-flex items-center gap-1 font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200/60">
+                                      <MapPin size={11} /> {driver.sector}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400 italic">Não especificado</span>
+                                  )}
+                                </td>
+                                <td className="px-6 py-5 text-xs text-slate-600 font-medium">{driver.address || '—'}</td>
+                                <td className="px-6 py-5 text-xs">
+                                  {linkedTruck ? (
+                                    <span className="font-mono font-bold bg-slate-100 border border-slate-200 px-2 py-0.5 rounded text-slate-700">
+                                      🚛 {linkedTruck.plate}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400 italic text-[11px]">Nenhum caminhão</span>
+                                  )}
+                                </td>
+                                <td className="px-6 py-5 text-center flex items-center justify-center gap-2">
+                                  <button onClick={() => handleEdit('drivers', driver)} className="p-2 bg-slate-100 text-slate-500 hover:bg-brand-primary hover:text-white rounded-lg transition-colors cursor-pointer" title="Editar"><Edit2 size={16}/></button>
+                                  <button onClick={() => handleDelete('drivers', driver.id)} className="p-2 bg-slate-100 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-colors cursor-pointer" title="Excluir"><Trash2 size={16}/></button>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
 
                     {/* Mobile Cards for Drivers */}
                     <div className="sm:hidden space-y-3">
-                      {drivers.map(driver => (
-                        <div key={driver.id} className="bg-slate-50/50 p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-3">
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Motorista</span>
-                              <h4 className="font-black text-brand-dark uppercase tracking-tight leading-tight">{driver.name}</h4>
+                      {drivers.map(driver => {
+                        const linkedTruck = trucks.find(t => t.driverName.toLowerCase() === driver.name.toLowerCase());
+                        return (
+                          <div key={driver.id} className="bg-slate-50/50 p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-2">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Motorista</span>
+                                <h4 className="font-black text-brand-dark uppercase tracking-tight leading-tight">{driver.name}</h4>
+                              </div>
+                              <div className="flex gap-1.5 shrink-0">
+                                <button 
+                                  onClick={() => handleEdit('drivers', driver)} 
+                                  className="p-2.5 bg-white border border-slate-200 text-slate-500 hover:bg-brand-primary hover:text-white rounded-xl active:scale-95 transition-all shadow-sm"
+                                  title="Editar"
+                                >
+                                  <Edit2 size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => handleDelete('drivers', driver.id)} 
+                                  className="p-2.5 bg-white border border-slate-200 text-red-500 hover:bg-red-50 rounded-xl active:scale-95 transition-all shadow-sm"
+                                  title="Excluir"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex gap-1.5 shrink-0">
-                              <button 
-                                onClick={() => handleEdit('drivers', driver)} 
-                                className="p-2.5 bg-white border border-slate-200 text-slate-500 hover:bg-brand-primary hover:text-white rounded-xl active:scale-95 transition-all shadow-sm"
-                                title="Editar"
-                              >
-                                <Edit2 size={14} />
-                              </button>
-                              <button 
-                                onClick={() => handleDelete('drivers', driver.id)} 
-                                className="p-2.5 bg-white border border-slate-200 text-red-500 hover:bg-red-50 rounded-xl active:scale-95 transition-all shadow-sm"
-                                title="Excluir"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
+                            {driver.homeSitio && (
+                              <div className="text-[11px] font-bold text-emerald-950 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200/80 w-fit flex items-center gap-1.5 flex-wrap">
+                                <span>🏡 Sítio: <strong>{driver.homeSitio}</strong></span>
+                                {driver.homeLat && driver.homeLng ? (
+                                  <span className="text-[9px] font-mono text-emerald-700 bg-emerald-100/90 px-1.5 py-0.2 rounded font-black flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    GPS Ativo
+                                  </span>
+                                ) : (
+                                  <span className="text-[9px] text-amber-600 font-medium">Sem GPS</span>
+                                )}
+                              </div>
+                            )}
+                            {driver.sector && (
+                              <div className="text-[11px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-200/60 w-fit flex items-center gap-1">
+                                <MapPin size={11} /> Setor: {driver.sector}
+                              </div>
+                            )}
+                            {driver.address && (
+                              <p className="text-[11px] text-slate-600">
+                                Base/Endereço: <strong>{driver.address}</strong>
+                              </p>
+                            )}
+                            {linkedTruck && (
+                              <p className="text-[11px] text-slate-600 font-mono">
+                                Caminhão: <strong>{linkedTruck.plate}</strong>
+                              </p>
+                            )}
+                            {driver.phone && (
+                              <div className="text-xs border-t border-slate-100 pt-1.5 flex items-center gap-1.5 font-mono text-slate-600">
+                                <Smartphone size={12} className="text-slate-400" />
+                                <a href={`tel:${driver.phone}`} className="hover:underline font-bold text-slate-700">{driver.phone}</a>
+                              </div>
+                            )}
                           </div>
-                          {driver.phone && (
-                            <div className="text-xs border-t border-slate-100 pt-2 flex items-center gap-1.5 font-mono text-slate-600">
-                              <Smartphone size={12} className="text-slate-400" />
-                              <a href={`tel:${driver.phone}`} className="hover:underline font-bold text-slate-700">{driver.phone}</a>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                        );
+                      })}
                       {drivers.length === 0 && (
                         <p className="text-center py-6 text-slate-400 text-xs">Nenhum motorista cadastrado.</p>
                       )}
@@ -2848,11 +5902,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               <div className="flex items-center gap-2.5">
                 <button
                   onClick={() => setActiveTab('map')}
-                  className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                  className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                   title="Voltar para o Painel"
+                  aria-label="Voltar para o Painel"
                 >
-                  <ArrowLeft size={14} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={16} />
                 </button>
                 <h2 className="text-3xl font-bold">Vereadores</h2>
               </div>
@@ -2885,11 +5939,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                <div className="flex items-center gap-2.5">
                  <button
                    onClick={() => setActiveTab('map')}
-                   className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                   className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                    title="Voltar para o Painel"
+                   aria-label="Voltar para o Painel"
                  >
-                   <ArrowLeft size={14} />
-                   <span>Voltar</span>
+                   <ArrowLeft size={16} />
                  </button>
                  <h2 className="text-xl sm:text-2xl lg:text-3xl font-black flex items-center gap-2.5 uppercase tracking-tight">
                    <Shield className="text-brand-dark" size={24} /> Configurações
@@ -3198,11 +6252,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <div className="flex items-center gap-2.5">
                   <button
                     onClick={() => setActiveTab('map')}
-                    className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
+                    className="w-9 h-9 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shadow-xs transition-all active:scale-95 cursor-pointer shrink-0"
                     title="Voltar para o Painel"
+                    aria-label="Voltar para o Painel"
                   >
-                    <ArrowLeft size={14} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={16} />
                   </button>
                   <h2 className="text-xl sm:text-2xl lg:text-3xl font-black flex items-center gap-2.5 uppercase tracking-tight">
                     <Database className="text-brand-dark" size={26} /> Sincronia de Aparelhos
@@ -3406,11 +6460,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button 
                     onClick={() => setActiveDashboardModal(null)} 
-                    className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                    className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
                     title="Voltar"
+                    aria-label="Voltar"
                   >
-                    <ArrowLeft size={13} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={15} />
                   </button>
                   <button 
                     onClick={() => setActiveDashboardModal(null)} 
@@ -3858,10 +6912,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 )}
                 <button
                   onClick={() => setActiveDashboardModal(null)}
-                  className="w-full sm:w-auto bg-slate-100 text-slate-700 hover:bg-slate-200 px-4 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                  className="w-8 h-8 sm:w-9 sm:h-9 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={14} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={16} />
                 </button>
               </div>
             </motion.div>
@@ -3875,10 +6930,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight">Novo Caminhão</h3>
                 <button
                   onClick={() => setShowAddTruck(false)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
               <div className="space-y-4">
@@ -3929,10 +6985,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button 
                     onClick={() => setShowAddDelivery(false)} 
-                    className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                    className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                    title="Voltar"
+                    aria-label="Voltar"
                   >
-                    <ArrowLeft size={13} />
-                    <span>Voltar</span>
+                    <ArrowLeft size={15} />
                   </button>
                   <button 
                     onClick={() => setShowAddDelivery(false)} 
@@ -3944,31 +7001,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Seletor de Caminhão / Motorista */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                      <TruckIcon size={12} className="text-blue-600" />
-                      1. Caminhão / Motorista *
-                    </label>
-                    <select 
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all"
-                      value={newDelivery.truckId}
-                      onChange={e => setNewDelivery(prev => ({ ...prev, truckId: e.target.value }))}
-                    >
-                      <option value="">Selecionar Caminhão...</option>
-                      {trucks.map(t => (
-                        <option key={t.id} value={t.id}>
-                          {t.driverName} ({t.plate}) - {t.status === 'IDLE' ? 'Disponível' : 'Em Rota'}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Seletor do Morador Salvo */}
+                  {/* 1. Seletor do Morador Salvo */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
                       <Users size={12} className="text-emerald-600" />
-                      2. Morador do Banco de Dados *
+                      1. Destinatário (Morador, Escola ou Creche) *
                     </label>
                     <select 
                       className="w-full bg-emerald-50/50 border border-emerald-200 rounded-xl px-4 py-3 text-sm font-black text-slate-800 outline-none focus:border-emerald-500 focus:bg-white transition-all"
@@ -3978,14 +7015,140 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                         handleSelectResident(sel || null);
                       }}
                     >
-                      <option value="">Escolha um Morador Cadastrado...</option>
-                      {[...residents].sort((a, b) => a.name.localeCompare(b.name)).map(r => (
-                        <option key={r.id} value={r.id}>
-                          {r.name} — {r.neighborhood || r.address || 'Inhapi'}
-                        </option>
-                      ))}
+                      <option value="">Escolha um Morador, Escola ou Creche...</option>
+                      {[...residents].sort((a, b) => a.name.localeCompare(b.name)).map(r => {
+                        const m = getResidentSectorAndDriver(r);
+                        return (
+                          <option key={r.id} value={r.id}>
+                            {r.category === 'SCHOOL' ? '🏫 [ESCOLA] ' : r.category === 'DAYCARE' ? '👶 [CRECHE] ' : '🏠 '}{r.name} — {r.neighborhood || r.address || 'Inhapi'} {m.driverName ? `[🔔 ${m.driverName}]` : ''}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
+
+                  {/* 2. Seletor de Caminhão / Motorista com destaque para o indicado */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                      <TruckIcon size={12} className="text-blue-600" />
+                      2. Caminhão / Motorista *
+                    </label>
+                    <select 
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-semibold text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all"
+                      value={newDelivery.truckId}
+                      onChange={e => setNewDelivery(prev => ({ ...prev, truckId: e.target.value }))}
+                    >
+                      <option value="">Selecionar Caminhão...</option>
+                      {trucks.map(t => {
+                        const isRecommended = selectedResidentObj && getResidentSectorAndDriver(selectedResidentObj).truckId === t.id;
+                        return (
+                          <option key={t.id} value={t.id}>
+                            {isRecommended ? '⭐ [INDICADO P/ ESTE SETOR] ' : ''}
+                            {t.driverName} ({t.plate}) - {t.status === 'IDLE' ? 'Disponível' : 'Em Rota'} {t.sector ? `[Setor: ${t.sector}]` : ''}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  {/* NOTIFICAÇÃO PARA O SECRETÁRIO: Motorista indicado para este morador */}
+                  {selectedResidentObj && (() => {
+                    const match = getResidentSectorAndDriver(selectedResidentObj);
+                    const isSelectedTruckMatched = newDelivery.truckId === match.truckId;
+                    const selectedTruckObj = trucks.find(t => t.id === newDelivery.truckId);
+
+                    return (
+                      <div className="md:col-span-2 bg-gradient-to-r from-amber-50 via-amber-50/80 to-yellow-50/60 border-2 border-amber-300 rounded-2xl p-4 shadow-sm space-y-2 animate-in fade-in duration-200">
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                          <div className="flex items-start gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+                              <Bell size={16} />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-xs font-black uppercase tracking-wider text-amber-950">
+                                  Notificação para o Secretário
+                                </span>
+                                <span className="text-[10px] font-bold bg-amber-200/90 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                                  Setor: {match.sectorName}
+                                </span>
+                              </div>
+                              <p className="text-xs text-amber-900 font-semibold mt-1">
+                                {match.driverName ? (
+                                  <>
+                                    Motorista indicado para este endereço/setor: <strong className="font-black text-amber-950 text-sm">{match.driverName}</strong>
+                                    {match.plate ? ` (Placa: ${match.plate})` : ''}
+                                  </>
+                                ) : (
+                                  <>Nenhum motorista fixado exclusivamente para este setor. Você pode selecionar qualquer caminhão da frota.</>
+                                )}
+                              </p>
+                              <span className="text-[10px] text-amber-800 font-medium block mt-0.5">
+                                Motivo: {match.reasonText}
+                              </span>
+                            </div>
+                          </div>
+
+                          {match.truckId && !isSelectedTruckMatched && (
+                            <button
+                              type="button"
+                              onClick={() => setNewDelivery(prev => ({ ...prev, truckId: match.truckId }))}
+                              className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all active:scale-95 shadow-sm shrink-0 flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <CheckCircle2 size={13} />
+                              Selecionar {match.driverName}
+                            </button>
+                          )}
+                          {match.truckId && isSelectedTruckMatched && (
+                            <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-xl shrink-0 flex items-center gap-1">
+                              <CheckCircle2 size={14} className="text-emerald-600" /> Motorista Selecionado!
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Recomendação de Proximidade por GPS do Sítio do Motorista */}
+                        {match.closestDriverByGps && (
+                          <div className="mt-2.5 pt-2.5 border-t border-amber-300/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 bg-white/70 p-2.5 rounded-xl border border-amber-200">
+                            <div className="flex items-start gap-2 min-w-0">
+                              <span className="text-lg shrink-0">📍</span>
+                              <div className="min-w-0 text-xs">
+                                <span className="text-[10px] font-black uppercase text-emerald-800 tracking-wider block">
+                                  Proximidade Geográfica via GPS do Sítio:
+                                </span>
+                                <p className="font-bold text-slate-900 mt-0.5">
+                                  {match.closestDriverByGps.driver.name}
+                                  <span className="text-slate-600 font-normal"> mora no </span>
+                                  <span className="text-emerald-950 font-black">{match.closestDriverByGps.driver.homeSitio || 'Sítio'}</span>
+                                  <span className="text-slate-600 font-normal"> a apenas </span>
+                                  <span className="text-emerald-800 font-extrabold bg-emerald-100 px-1.5 py-0.2 rounded border border-emerald-300/80">{match.closestDriverByGps.distanceKm.toFixed(1)} km</span>
+                                  <span className="text-slate-600 font-normal"> de distância deste morador.</span>
+                                </p>
+                              </div>
+                            </div>
+                            {match.closestDriverByGps.truck && newDelivery.truckId !== match.closestDriverByGps.truck.id && (
+                              <button
+                                type="button"
+                                onClick={() => setNewDelivery(prev => ({ ...prev, truckId: match.closestDriverByGps!.truck!.id }))}
+                                className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-black text-[11px] uppercase tracking-wider rounded-xl transition-all shadow-sm shrink-0 flex items-center gap-1 active:scale-95 cursor-pointer"
+                              >
+                                <Navigation size={12} /> Selecionar Mais Próximo
+                              </button>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Aviso se selecionou outro motorista diferente do indicado */}
+                        {match.driverName && selectedTruckObj && selectedTruckObj.id !== match.truckId && (
+                          <div className="text-[10px] text-amber-800 bg-white/70 border border-amber-200 px-3 py-1.5 rounded-xl font-medium flex items-center gap-1.5">
+                            <AlertCircle size={13} className="text-amber-600 shrink-0" />
+                            <span>
+                              Atenção Secretário: O motorista habitual deste setor é <strong>{match.driverName}</strong>, mas você selecionou <strong>{selectedTruckObj.driverName}</strong>. A entrega será despachada para {selectedTruckObj.driverName}.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Card com os dados que foram preenchidos automaticamente do banco */}
                   {selectedResidentObj ? (
@@ -4134,10 +7297,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight">{editingSitio ? 'Editar Local' : 'Novo Local'}</h3>
                 <button
                   onClick={() => { setShowAddSitio(false); setEditingSitio(null); }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
               
@@ -4237,56 +7401,320 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
         {showAddResident && (
           <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[2000] flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
              <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="bg-white rounded-2xl sm:rounded-[36px] p-5 sm:p-8 max-w-md w-full shadow-2xl border-2 sm:border-4 border-brand-dark/10 overflow-y-auto max-h-[92dvh] my-auto">
-              <div className="flex items-center justify-between mb-4 sm:mb-6">
-                <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight">Novo Morador</h3>
+              <div className="flex items-center justify-between mb-4 sm:mb-5">
+                <div>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">
+                    Cadastro no Sistema
+                  </span>
+                  <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-slate-900">
+                    {newResident.category === 'SCHOOL' ? 'Nova Escola' :
+                     newResident.category === 'DAYCARE' ? 'Nova Creche' :
+                     'Novo Morador'}
+                  </h3>
+                </div>
                 <button
                   onClick={() => {
                     setShowAddResident(false);
+                    setShowNameAutocomplete(false);
+                    setDuplicateWarningAcknowledged(false);
+                    setResidentFormError('');
                     setIsAddingCouncilmanInResident(false);
                     setInlineCouncilmanName('');
                   }}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
-              <div className="space-y-4">
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3" 
-                  placeholder="Nome Completo"
-                  value={newResident.name}
-                  onChange={e => setNewResident(prev => ({ ...prev, name: e.target.value }))}
-                />
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3" 
-                  placeholder="Endereço"
-                  value={newResident.address}
-                  onChange={e => setNewResident(prev => ({ ...prev, address: e.target.value }))}
-                />
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3" 
-                  placeholder="Bairro / Sítio"
-                  value={newResident.neighborhood}
-                  onChange={e => setNewResident(prev => ({ ...prev, neighborhood: e.target.value }))}
-                />
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3" 
-                  placeholder="Telefone (opcional)"
-                  value={newResident.phone}
-                  onChange={e => setNewResident(prev => ({ ...prev, phone: e.target.value }))}
-                />
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3" 
-                  placeholder="Ponto de Referência"
-                  value={newResident.referencePoint || ''}
-                  onChange={e => setNewResident(prev => ({ ...prev, referencePoint: e.target.value }))}
-                />
+
+              {/* Category Selector Tabs */}
+              <div className="mb-4">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1.5 pl-1">
+                  Selecione o Tipo de Destinatário:
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setResidentFormError('');
+                      setNewResident(prev => ({ ...prev, category: 'RESIDENT' }));
+                    }}
+                    className={`py-2.5 rounded-xl text-[11px] font-black uppercase transition-all border flex items-center justify-center gap-1.5 cursor-pointer ${
+                      (!newResident.category || newResident.category === 'RESIDENT')
+                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-600/20' 
+                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Home size={13} />
+                    <span>Morador</span>
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setResidentFormError('');
+                      setNewResident(prev => ({ ...prev, category: 'SCHOOL' }));
+                    }}
+                    className={`py-2.5 rounded-xl text-[11px] font-black uppercase transition-all border flex items-center justify-center gap-1.5 cursor-pointer ${
+                      newResident.category === 'SCHOOL' 
+                        ? 'bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/20' 
+                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <School size={13} />
+                    <span>Escola</span>
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      setResidentFormError('');
+                      setNewResident(prev => ({ ...prev, category: 'DAYCARE' }));
+                    }}
+                    className={`py-2.5 rounded-xl text-[11px] font-black uppercase transition-all border flex items-center justify-center gap-1.5 cursor-pointer ${
+                      newResident.category === 'DAYCARE' 
+                        ? 'bg-pink-600 border-pink-500 text-white shadow-md shadow-pink-600/20' 
+                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Baby size={13} />
+                    <span>Creche</span>
+                  </button>
+                </div>
+              </div>
+
+              {residentFormError && (
+                <div className="mb-3 p-3 bg-red-50 border border-red-200 text-red-700 text-xs font-bold rounded-xl flex items-center gap-2">
+                  <AlertCircle size={15} className="text-red-500 shrink-0" />
+                  <span>{residentFormError}</span>
+                </div>
+              )}
+
+              <div className="space-y-3.5">
+                <div className="space-y-1 relative">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Nome {newResident.category === 'SCHOOL' ? 'da Escola' : newResident.category === 'DAYCARE' ? 'da Creche' : 'do Morador'} *
+                    </label>
+                    {newResident.name.trim().length >= 2 && residentNameSuggestions.length > 0 && (
+                      <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 flex items-center gap-1">
+                        <Users size={11} />
+                        {residentNameSuggestions.length} {residentNameSuggestions.length === 1 ? 'sugestão' : 'sugestões'}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <input 
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:bg-white transition-all pr-10" 
+                      placeholder={
+                        newResident.category === 'SCHOOL' ? 'Ex: Escola Municipal Maria das Graças' :
+                        newResident.category === 'DAYCARE' ? 'Ex: Creche Municipal Tia Emília' :
+                        'Nome Completo do Morador'
+                      }
+                      value={newResident.name}
+                      onFocus={() => setShowNameAutocomplete(true)}
+                      onChange={e => {
+                        setResidentFormError('');
+                        setDuplicateWarningAcknowledged(false);
+                        setShowNameAutocomplete(true);
+                        setNewResident(prev => ({ ...prev, name: e.target.value }));
+                      }}
+                    />
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                      <Search size={16} />
+                    </div>
+                  </div>
+
+                  {/* Auto-complete Suggestions Dropdown */}
+                  {showNameAutocomplete && residentNameSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl p-2.5 max-h-64 overflow-y-auto custom-scrollbar animate-in fade-in slide-in-from-top-1 duration-150">
+                      <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-slate-100">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                          <Users size={12} className="text-blue-600" />
+                          Cadastros encontrados com este nome:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowNameAutocomplete(false)}
+                          className="p-1 hover:bg-slate-100 rounded-md text-slate-400 hover:text-slate-600 cursor-pointer"
+                          title="Fechar sugestões"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+
+                      <div className="space-y-1.5 pt-1">
+                        {residentNameSuggestions.map(sug => {
+                          const sugCategory = sug.category || 'RESIDENT';
+                          const isExact = (sug.name || '').trim().toLowerCase() === newResident.name.trim().toLowerCase();
+
+                          return (
+                            <div 
+                              key={sug.id}
+                              className={`p-2.5 rounded-xl border transition-all text-left flex flex-col gap-1.5 ${
+                                isExact 
+                                  ? 'bg-amber-50/80 border-amber-300 ring-1 ring-amber-400/40' 
+                                  : 'bg-slate-50 hover:bg-blue-50/50 border-slate-200/80'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-1.5">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {sugCategory === 'SCHOOL' ? (
+                                      <span className="text-[8px] font-black text-indigo-700 bg-indigo-100 border border-indigo-200 px-1.5 py-0.2 rounded">
+                                        🏫 ESCOLA
+                                      </span>
+                                    ) : sugCategory === 'DAYCARE' ? (
+                                      <span className="text-[8px] font-black text-pink-700 bg-pink-100 border border-pink-200 px-1.5 py-0.2 rounded">
+                                        👶 CRECHE
+                                      </span>
+                                    ) : (
+                                      <span className="text-[8px] font-black text-emerald-700 bg-emerald-100 border border-emerald-200 px-1.5 py-0.2 rounded">
+                                        🏠 MORADOR
+                                      </span>
+                                    )}
+                                    <strong className="text-xs font-black text-slate-900 truncate">
+                                      {sug.name}
+                                    </strong>
+                                    {isExact && (
+                                      <span className="text-[8px] font-black text-amber-700 bg-amber-200/70 border border-amber-300 px-1.5 py-0.2 rounded-full uppercase">
+                                        Já cadastrado
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <p className="text-[11px] text-slate-500 font-medium mt-0.5 truncate">
+                                    📍 {sug.neighborhood || sug.address || 'Inhapi'}
+                                    {sug.referencePoint ? ` • Ref: ${sug.referencePoint}` : ''}
+                                    {sug.councilman ? ` • 🏛️ ${sug.councilman}` : ''}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-200/50">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNewResident({
+                                      name: sug.name,
+                                      address: sug.address || '',
+                                      neighborhood: sug.neighborhood || '',
+                                      phone: sug.phone || '',
+                                      referencePoint: sug.referencePoint || '',
+                                      councilman: sug.councilman || '',
+                                      category: sug.category || 'RESIDENT'
+                                    });
+                                    setShowNameAutocomplete(false);
+                                    setDuplicateWarningAcknowledged(true);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-slate-200/80 hover:bg-slate-300 text-slate-700 text-[10px] font-bold transition-all cursor-pointer"
+                                  title="Carregar dados deste cadastro no formulário"
+                                >
+                                  Preencher Formulário
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowAddResident(false);
+                                    setShowNameAutocomplete(false);
+                                    handleEdit('residents', sug);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black flex items-center gap-1 shadow-xs transition-all cursor-pointer"
+                                  title="Abrir este cadastro existente para editar em vez de criar duplicata"
+                                >
+                                  <Edit2 size={10} />
+                                  <span>Editar Existente</span>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Duplicate warning alert if exact match exists */}
+                  {exactDuplicateResident && (
+                    <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl flex flex-col gap-1.5 mt-2 animate-in fade-in duration-200 shadow-xs">
+                      <div className="flex items-center gap-1.5">
+                        <AlertCircle size={15} className="text-amber-600 shrink-0" />
+                        <span className="text-xs font-black uppercase tracking-tight">Aviso de Cadastro Existente</span>
+                      </div>
+                      <p className="text-xs text-amber-800">
+                        Já existe um cadastro registrado com o nome <strong>"{exactDuplicateResident.name}"</strong> no sítio <strong>{exactDuplicateResident.neighborhood || exactDuplicateResident.address || 'Inhapi'}</strong>
+                        {exactDuplicateResident.councilman ? ` (Indicação: ${exactDuplicateResident.councilman})` : ''}.
+                      </p>
+                      <div className="flex items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAddResident(false);
+                            setShowNameAutocomplete(false);
+                            handleEdit('residents', exactDuplicateResident);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1 transition-all cursor-pointer shadow-xs"
+                        >
+                          <Edit2 size={11} />
+                          <span>Abrir e Editar Registro Existente</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                    Bairro / Sítio (Ex: Sítio Promissão, Sítio Chã, Centro)
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all" 
+                    placeholder="Nome do Sítio ou Bairro"
+                    value={newResident.neighborhood}
+                    onChange={e => setNewResident(prev => ({ ...prev, neighborhood: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                    Endereço / Localização <span className="text-slate-400 lowercase font-normal">(opcional se preencher Sítio)</span>
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all" 
+                    placeholder="Rua, número ou estrada vicinal"
+                    value={newResident.address}
+                    onChange={e => setNewResident(prev => ({ ...prev, address: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                    Telefone / WhatsApp <span className="text-slate-400 lowercase font-normal">(opcional)</span>
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-mono text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all" 
+                    placeholder="(82) 99999-9999"
+                    value={newResident.phone}
+                    onChange={e => setNewResident(prev => ({ ...prev, phone: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                    Ponto de Referência <span className="text-slate-400 lowercase font-normal">(opcional)</span>
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all" 
+                    placeholder="Ex: Próximo à caixa d'água / em frente ao mercadinho"
+                    value={newResident.referencePoint || ''}
+                    onChange={e => setNewResident(prev => ({ ...prev, referencePoint: e.target.value }))}
+                  />
+                </div>
 
                 {/* Seleção de Vereador cadastrado ou Adicionar Novo */}
                 <div className="space-y-1.5 pt-1">
                   <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider pl-1">
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider pl-1">
                       Vereador / Indicação
                     </label>
                     {!isAddingCouncilmanInResident && (
@@ -4296,7 +7724,7 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                           setIsAddingCouncilmanInResident(true);
                           setInlineCouncilmanName('');
                         }}
-                        className="text-[11px] font-black text-purple-600 hover:text-purple-700 flex items-center gap-1 active:scale-95 transition-all"
+                        className="text-[11px] font-black text-purple-600 hover:text-purple-700 flex items-center gap-1 active:scale-95 transition-all cursor-pointer"
                       >
                         <Plus size={12} /> Novo Vereador
                       </button>
@@ -4370,7 +7798,7 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                               setInlineCouncilmanName('');
                             }
                           }}
-                          className="px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold active:scale-95 transition-all shadow-sm"
+                          className="px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold active:scale-95 transition-all shadow-sm cursor-pointer"
                         >
                           Salvar
                         </button>
@@ -4383,26 +7811,82 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                       <button
                         type="button"
                         onClick={() => setNewResident(prev => ({ ...prev, councilman: '' }))}
-                        className="text-slate-400 hover:text-red-500 text-[10px] underline ml-2"
+                        className="text-slate-400 hover:text-red-500 text-[10px] underline ml-2 cursor-pointer"
                       >
                         Limpar
                       </button>
                     </div>
                   )}
                 </div>
+
+                {/* Setor / Região do Morador */}
+                <div className="space-y-1 pt-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1">
+                    <MapPin size={11} className="text-blue-500" />
+                    Setor / Sítio Específico
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-500 focus:bg-white transition-all font-medium" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={newResident.sector || ''}
+                    onChange={e => setNewResident(prev => ({ ...prev, sector: e.target.value }))}
+                  />
+                  <p className="text-[9px] text-slate-400 pl-1">
+                    Permite agrupar as entregas automaticamente para o motorista deste setor.
+                  </p>
+                </div>
+
+                {/* Motorista Vinculado / Notificado para o Secretário */}
+                <div className="space-y-1 pt-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1">
+                    <Bell size={11} className="text-amber-500" />
+                    Motorista Vinculado / Recomendado (Notificação p/ Secretário)
+                  </label>
+                  <select
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-800 focus:border-brand-primary outline-none font-semibold"
+                    value={newResident.preferredDriver || ''}
+                    onChange={e => setNewResident(prev => ({ ...prev, preferredDriver: e.target.value }))}
+                  >
+                    <option value="">Detecção Automática (pelo Sítio / Endereço)</option>
+                    {drivers.map(d => (
+                      <option key={d.id} value={d.name}>
+                        🚛 {d.name} {d.sector ? `(Setor: ${d.sector})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-slate-400 pl-1">
+                    Ao definir, o secretário verá uma notificação direta indicando este motorista sempre que for despachar água.
+                  </p>
+                </div>
               </div>
-              <div className="flex gap-4 mt-8">
+
+              <div className="flex gap-3 mt-6 sm:mt-8">
                 <button 
+                  type="button"
                   onClick={() => {
                     setShowAddResident(false);
+                    setShowNameAutocomplete(false);
+                    setDuplicateWarningAcknowledged(false);
+                    setResidentFormError('');
                     setIsAddingCouncilmanInResident(false);
                     setInlineCouncilmanName('');
                   }} 
-                  className="flex-1 py-3 rounded-xl border border-slate-200"
+                  className="flex-1 py-3 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors cursor-pointer"
                 >
                   Cancelar
                 </button>
-                <button onClick={handleAddResident} className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-semibold">Salvar</button>
+                <button 
+                  type="button"
+                  disabled={isSavingResident}
+                  onClick={handleAddResident} 
+                  className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-black text-xs uppercase tracking-wider shadow-lg shadow-blue-500/20 active:scale-95 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Save size={15} />
+                  <span>
+                    {isSavingResident ? 'Salvando...' : 
+                     `Salvar ${newResident.category === 'SCHOOL' ? 'Escola' : newResident.category === 'DAYCARE' ? 'Creche' : 'Morador'}`}
+                  </span>
+                </button>
               </div>
             </motion.div>
           </div>
@@ -4415,10 +7899,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight">Novo Vereador</h3>
                 <button
                   onClick={() => setShowAddCouncilman(false)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
               <div className="space-y-4">
@@ -4444,10 +7929,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight">Novo Motorista</h3>
                 <button
                   onClick={() => setShowAddDriver(false)}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={13} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={15} />
                 </button>
               </div>
               <div className="space-y-4">
@@ -4458,11 +7944,77 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                   onChange={e => setNewDriver(prev => ({ ...prev, name: e.target.value }))}
                 />
                 <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-mono" 
-                  placeholder="Telefone / Contato"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-mono text-sm outline-none focus:border-blue-500" 
+                  placeholder="Telefone / Contato (Ex: 82 99999-9999)"
                   value={newDriver.phone}
                   onChange={e => setNewDriver(prev => ({ ...prev, phone: e.target.value }))}
                 />
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1">
+                    <MapPin size={11} className="text-blue-500" />
+                    Setor / Sítios Atendidos por este Motorista
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={newDriver.sector}
+                    onChange={e => setNewDriver(prev => ({ ...prev, sector: e.target.value }))}
+                  />
+                  <p className="text-[9px] text-slate-400 pl-1">
+                    Define o setor do motorista para que o sistema separe e notifique o secretário nas entregas.
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1">
+                    <Home size={11} className="text-slate-500" />
+                    Endereço / Base do Motorista
+                  </label>
+                  <input 
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:border-blue-500" 
+                    placeholder="Ex: Centro, Rua São Vicente"
+                    value={newDriver.address}
+                    onChange={e => setNewDriver(prev => ({ ...prev, address: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-emerald-700 pl-1 flex items-center gap-1">
+                    <Home size={11} className="text-emerald-600" />
+                    Sítio onde Mora (Residência do Motorista)
+                  </label>
+                  <input 
+                    className="w-full bg-emerald-50/50 border border-emerald-300 rounded-xl px-4 py-3 text-sm outline-none focus:border-emerald-500 font-semibold text-slate-800" 
+                    placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                    value={newDriver.homeSitio}
+                    onChange={e => setNewDriver(prev => ({ ...prev, homeSitio: e.target.value }))}
+                  />
+                  <p className="text-[9px] text-slate-400 pl-1">
+                    Localidade onde o motorista mora para mapeamento e cálculo de proximidade das entregas.
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1">
+                    <Navigation size={11} className="text-slate-400" />
+                    Coordenadas GPS da Residência (Opcional - Motorista também salva via celular)
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input 
+                      type="number"
+                      step="any"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:border-blue-500" 
+                      placeholder="Latitude"
+                      value={newDriver.homeLat || ''}
+                      onChange={e => setNewDriver(prev => ({ ...prev, homeLat: parseFloat(e.target.value) || 0 }))}
+                    />
+                    <input 
+                      type="number"
+                      step="any"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:border-blue-500" 
+                      placeholder="Longitude"
+                      value={newDriver.homeLng || ''}
+                      onChange={e => setNewDriver(prev => ({ ...prev, homeLng: parseFloat(e.target.value) || 0 }))}
+                    />
+                  </div>
+                </div>
               </div>
               <div className="flex gap-4 mt-8">
                 <button onClick={() => setShowAddDriver(false)} className="flex-1 py-3 rounded-xl border border-slate-200">Cancelar</button>
@@ -4500,10 +8052,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                        setSelectedTruck(null);
                        setPlannedRoute(undefined);
                      }}
-                     className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                     className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                     title="Voltar"
+                     aria-label="Voltar"
                    >
-                     <ArrowLeft size={14} />
-                     <span>Voltar</span>
+                     <ArrowLeft size={15} />
                    </button>
                    <button 
                      onClick={() => {
@@ -4678,10 +8231,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                  <div className="flex items-center gap-1.5">
                    <button 
                      onClick={() => setSelectedSitio(null)}
-                     className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                     className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                     title="Voltar"
+                     aria-label="Voltar"
                    >
-                     <ArrowLeft size={14} />
-                     <span>Voltar</span>
+                     <ArrowLeft size={15} />
                    </button>
                    <button 
                      onClick={() => setSelectedSitio(null)}
@@ -4740,10 +8294,11 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
               <div className="absolute -top-12 right-0 flex items-center gap-2">
                 <button 
                   onClick={() => setSelectedPhoto(null)}
-                  className="text-white bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-xl text-white bg-white/15 hover:bg-white/25 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
                 >
-                  <ArrowLeft size={15} />
-                  <span>Voltar</span>
+                  <ArrowLeft size={16} />
                 </button>
                 <button 
                   onClick={() => setSelectedPhoto(null)}
@@ -4753,6 +8308,428 @@ export default function AdminApp({ onTrocarAcesso }: { onTrocarAcesso?: () => vo
                 </button>
               </div>
             </motion.div>
+          </div>
+        )}
+        {/* MODAL: NOVO / EDITAR ABASTECIMENTO */}
+        {showAddFuelModal && (
+          <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-md z-[2020] flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 14 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 14 }}
+              className="bg-white rounded-3xl p-5 sm:p-7 max-w-xl w-full shadow-2xl border border-slate-200 overflow-y-auto max-h-[92dvh] my-auto space-y-4"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-500/10 text-amber-600 flex items-center justify-center">
+                    <Fuel size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 uppercase tracking-tight">
+                      {editingFuelLog ? 'Editar Abastecimento' : 'Registrar Novo Abastecimento'}
+                    </h3>
+                    <p className="text-[11px] text-slate-500 font-medium">
+                      Auditoria de combustível e cálculo automático de KM/L por setor
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => {
+                      setShowAddFuelModal(false);
+                      setEditingFuelLog(null);
+                    }}
+                    className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                    title="Voltar"
+                    aria-label="Voltar"
+                  >
+                    <ArrowLeft size={15} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddFuelModal(false);
+                      setEditingFuelLog(null);
+                    }}
+                    className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              </div>
+
+              {fuelFormError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold flex items-center gap-2">
+                  <AlertCircle size={15} className="shrink-0 text-rose-600" />
+                  <span>{fuelFormError}</span>
+                </div>
+              )}
+
+              <div className="space-y-3.5">
+                {/* 1. Seleção de Caminhão-Pipa */}
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1.5">
+                    <TruckIcon size={12} className="text-blue-600" />
+                    Caminhão-Pipa *
+                  </label>
+                  <select
+                    value={fuelFormData.truckId}
+                    onChange={(e) => handleTruckSelectionInFuelForm(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                  >
+                    <option value="">Selecione o caminhão...</option>
+                    {trucks.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        🚛 {t.driverName} — Placa: {t.plate} {t.sector ? `(Setor: ${t.sector})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Motorista (auto-detectado ou custom) */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Motorista
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Nome do Motorista"
+                      value={fuelFormData.driverName}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, driverName: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+
+                  {/* Placa */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Placa do Veículo
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: ABC-1234"
+                      value={fuelFormData.plate}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, plate: e.target.value.toUpperCase() }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold uppercase text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Setor de Atuação */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1.5">
+                      <MapPin size={12} className="text-amber-600" />
+                      Setor / Região Atendida *
+                    </label>
+                    <input
+                      type="text"
+                      list="known-sectors-datalist"
+                      placeholder="Ex: Sítio Baixa da Areia, Povoado Leão"
+                      value={fuelFormData.sector}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, sector: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                    <datalist id="known-sectors-datalist">
+                      {sectorsList.map((s) => (
+                        <option key={s} value={s} />
+                      ))}
+                    </datalist>
+                    <span className="text-[9px] text-slate-400 pl-1 block">
+                      Define a qual setor este consumo de combustível será atribuído.
+                    </span>
+                  </div>
+
+                  {/* Data e Hora */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1 flex items-center gap-1.5">
+                      <Calendar size={12} className="text-blue-500" />
+                      Data e Hora do Abastecimento
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={fuelFormData.date}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, date: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Combustível e Litros */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {/* Tipo de Combustível */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Combustível
+                    </label>
+                    <select
+                      value={fuelFormData.fuelType}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, fuelType: e.target.value as FuelLogType }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    >
+                      <option value="DIESEL_S10">Diesel S-10</option>
+                      <option value="DIESEL_COMUM">Diesel Comum</option>
+                      <option value="GASOLINA">Gasolina</option>
+                      <option value="ARLA_32">Arla 32</option>
+                    </select>
+                  </div>
+
+                  {/* Litros Abastecidos */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Litros Abastecidos *
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="Ex: 120"
+                      value={fuelFormData.liters}
+                      onChange={(e) => {
+                        const l = e.target.value;
+                        setFuelFormData((prev) => {
+                          const p = Number(prev.pricePerLiter);
+                          const total = l && p ? (Number(l) * p).toFixed(2) : prev.totalCost;
+                          return { ...prev, liters: l, totalCost: total };
+                        });
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-black text-amber-950 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+
+                  {/* Preço por Litro */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Preço / Litro (R$)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="Ex: 6.45"
+                      value={fuelFormData.pricePerLiter}
+                      onChange={(e) => {
+                        const p = e.target.value;
+                        setFuelFormData((prev) => {
+                          const l = Number(prev.liters);
+                          const total = p && l ? (Number(p) * l).toFixed(2) : prev.totalCost;
+                          return { ...prev, pricePerLiter: p, totalCost: total };
+                        });
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Odômetros: Anterior e Atual */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Odômetro Anterior (KM)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="Ex: 145000"
+                      value={fuelFormData.previousKm}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, previousKm: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                    <span className="text-[9px] text-slate-400 pl-1 block">
+                      Último registro detectado
+                    </span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Odômetro Atual (KM) *
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="Ex: 145320"
+                      value={fuelFormData.currentKm}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, currentKm: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-black text-blue-900 outline-none focus:border-blue-500 focus:bg-white transition-all"
+                    />
+                    <span className="text-[9px] text-slate-400 pl-1 block">
+                      KM no momento da bomba
+                    </span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Valor Total da Nota (R$)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="Ex: 774.00"
+                      value={fuelFormData.totalCost}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, totalCost: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-black text-emerald-800 outline-none focus:border-emerald-500 focus:bg-white transition-all"
+                    />
+                    <span className="text-[9px] text-slate-400 pl-1 block">
+                      Calculado automaticamente
+                    </span>
+                  </div>
+                </div>
+
+                {/* PRÉVIA EM TEMPO REAL DO CONSUMO MÉDIO (KM/L, L/KM, R$/KM) */}
+                {(() => {
+                  const cKm = Number(fuelFormData.currentKm) || 0;
+                  const pKm = Number(fuelFormData.previousKm) || 0;
+                  const dist = Math.max(0, cKm - pKm);
+                  const lts = Number(fuelFormData.liters) || 0;
+                  const kmL = dist > 0 && lts > 0 ? (dist / lts).toFixed(2) : '—';
+                  const lKm = dist > 0 && lts > 0 ? (lts / dist).toFixed(3) : '—';
+                  const cost = Number(fuelFormData.totalCost) || (lts * Number(fuelFormData.pricePerLiter || 0));
+                  const costKm = dist > 0 && cost > 0 ? (cost / dist).toFixed(2) : '—';
+
+                  return (
+                    <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-emerald-500/10 rounded-2xl p-3.5 border border-amber-500/20 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black uppercase text-amber-950 tracking-wider flex items-center gap-1.5">
+                          <TrendingUp size={13} className="text-amber-600" />
+                          Cálculo de Consumo para o Setor: <strong className="text-amber-900">{fuelFormData.sector || 'Geral'}</strong>
+                        </span>
+                        <span className="text-[10px] font-mono font-bold text-slate-500">
+                          {dist > 0 ? `${dist} km rodados` : 'Preencha os KMs'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-center pt-1">
+                        <div className="bg-white/90 p-2 rounded-xl border border-amber-200/60">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Consumo Médio</span>
+                          <strong className="text-sm font-black text-amber-900 font-mono">
+                            {kmL !== '—' ? `${kmL} km/L` : '—'}
+                          </strong>
+                        </div>
+                        <div className="bg-white/90 p-2 rounded-xl border border-amber-200/60">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Por KM Rodado</span>
+                          <strong className="text-sm font-black text-slate-800 font-mono">
+                            {lKm !== '—' ? `${lKm} L/km` : '—'}
+                          </strong>
+                        </div>
+                        <div className="bg-white/90 p-2 rounded-xl border border-amber-200/60">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">Custo por KM</span>
+                          <strong className="text-sm font-black text-emerald-800 font-mono">
+                            {costKm !== '—' ? `R$ ${costKm}/km` : '—'}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Posto e Nota Fiscal */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Posto / Fornecedor
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Posto Central Inhapi"
+                      value={fuelFormData.gasStation}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, gasStation: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-medium text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                      Nº da Nota Fiscal / Cupom / Requisição
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: NF-e 10842"
+                      value={fuelFormData.invoiceNumber}
+                      onChange={(e) => setFuelFormData((prev) => ({ ...prev, invoiceNumber: e.target.value }))}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono font-medium text-slate-900 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Observações */}
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 pl-1">
+                    Observações Adicionais (opcional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Rota com serra acentuada, tanque cheio completo"
+                    value={fuelFormData.notes}
+                    onChange={(e) => setFuelFormData((prev) => ({ ...prev, notes: e.target.value }))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 outline-none focus:border-amber-500 focus:bg-white transition-all"
+                  />
+                </div>
+              </div>
+
+              {/* Botões do Modal */}
+              <div className="flex gap-2.5 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddFuelModal(false);
+                    setEditingFuelLog(null);
+                  }}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingFuelLog}
+                  onClick={handleSaveFuelLog}
+                  className="flex-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-lg shadow-amber-600/20 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Save size={14} />
+                  <span>{isSavingFuelLog ? 'Salvando...' : 'Salvar Abastecimento'}</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* MODAL: CONFIRMAR EXCLUSÃO DE ABASTECIMENTO */}
+        {fuelDeleteConfirm && (
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 max-w-sm w-full border border-slate-100 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200">
+              <div className="flex items-center justify-between">
+                <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center">
+                  <Trash2 size={24} />
+                </div>
+                <button
+                  onClick={() => setFuelDeleteConfirm(null)}
+                  className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-all active:scale-95 cursor-pointer shrink-0"
+                  title="Voltar"
+                  aria-label="Voltar"
+                >
+                  <ArrowLeft size={15} />
+                </button>
+              </div>
+              <div>
+                <h3 className="font-black text-base text-slate-900 uppercase tracking-tight">Excluir Abastecimento</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Deseja excluir o registro do caminhão <strong>{fuelDeleteConfirm.driverName}</strong> ({fuelDeleteConfirm.plate}) do setor <strong>{fuelDeleteConfirm.sector}</strong> de {fuelDeleteConfirm.liters} L?
+                </p>
+              </div>
+              <div className="flex gap-2 mt-1">
+                <button
+                  onClick={() => setFuelDeleteConfirm(null)}
+                  className="flex-1 bg-slate-100 py-2.5 rounded-xl font-bold text-slate-600 text-xs hover:bg-slate-200 transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => handleDeleteFuelLog(fuelDeleteConfirm.id)}
+                  className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  Confirmar Exclusão
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </AnimatePresence>
